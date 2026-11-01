@@ -58,7 +58,8 @@ export function calculatePortfolio(data: PortfolioData): PortfolioSnapshot {
 
   const cash = roundCurrency(activeTransactions.reduce((total, transaction) => total + transaction.cashFlow, 0))
   const investedValue = positions.reduce((total, position) => total + position.marketValue, 0)
-  const totalValue = roundCurrency(Math.max(investedValue + cash, 0))
+  const netValue = investedValue + cash
+  const totalValue = roundCurrency(investedValue > 0 ? Math.max(netValue, investedValue) : Math.max(netValue, 0))
   const totalCostBasis = roundCurrency(positions.reduce((total, position) => total + position.costBasis, 0))
   const unrealizedGainLoss = roundCurrency(positions.reduce((total, position) => total + position.gainLoss, 0))
   const allocation = calculateAllocation(positions, cash, totalValue, data.allocationTargets, data.rebalancingRules.minimumCashWeight)
@@ -80,7 +81,7 @@ export function calculateQdfHoldings(data: PortfolioData): CalculatedPosition[] 
 }
 
 function isSecurityTransaction(transaction: Transaction): boolean {
-  return (transaction.kind === 'Achat' || transaction.kind === 'Vente') && Boolean(transaction.quantity) && transaction.assetClass !== 'Non classé'
+  return (transaction.kind === 'Achat' || transaction.kind === 'Vente') && Boolean(transaction.quantity)
 }
 
 function calculateSecurityPositions(transactions: Transaction[], data: PortfolioData): CalculatedPosition[] {
@@ -140,7 +141,7 @@ function calculateQdfPosition(transactions: Transaction[], data: PortfolioData):
 }
 
 function calculateAllocation(positions: CalculatedPosition[], cash: number, totalValue: number, targets: AllocationTarget[], cashTarget: number): AllocationLine[] {
-  const assetClasses: AssetClass[] = ['ETF Monde', 'ETF Small Caps', 'Actions individuelles', 'ETF Maison', cashAssetClass]
+  const assetClasses: AssetClass[] = ['ETF Monde', 'ETF Small Caps', 'Actions individuelles', 'ETF Maison', 'Non classé', cashAssetClass]
   return assetClasses.map((assetClass) => {
     const value = assetClass === cashAssetClass ? cash : positions.filter((position) => position.assetClass === assetClass).reduce((total, position) => total + position.marketValue, 0)
     const targetWeight = assetClass === cashAssetClass ? cashTarget : targets.find((target) => target.assetClass === assetClass)?.targetWeight ?? 0

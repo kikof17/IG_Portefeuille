@@ -29,6 +29,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
 import type { AssetClass, PortfolioData, QdfConstituent, Transaction, TransactionKind } from './domain/portfolio'
 import { calculatePortfolio, calculateQdfHoldings, type PortfolioSnapshot } from './services/portfolioCalculation'
 import { downloadPortfolioWorkbook, downloadTransactionsCsv } from './services/portfolioExport'
@@ -50,31 +51,6 @@ const pageTitles: Record<Navigation, string> = {
   Paramètres: 'Paramètres du portefeuille',
 }
 
-const allocation = [
-  { name: 'ETF Monde', value: 64.2, target: 65, color: '#7c9cff' },
-  { name: 'ETF Small Caps', value: 12.1, target: 10, color: '#69d4b4' },
-  { name: 'Actions', value: 9.2, target: 10, color: '#e8af63' },
-  { name: 'QDF', value: 7.8, target: 10, color: '#b48cff' },
-  { name: 'Liquidités', value: 6.7, target: 5, color: '#667085' },
-]
-
-const performance = [
-  { date: 'Mai', value: 500 },
-  { date: 'Juin', value: 554 },
-  { date: 'Juil.', value: 570 },
-  { date: 'Août', value: 588 },
-  { date: 'Sept.', value: 602 },
-  { date: 'Aujourd’hui', value: 613.8 },
-]
-
-const positions = [
-  { name: 'Vanguard FTSE All-World', ticker: 'VWRA', isin: 'IE00BK5BQT80', type: 'ETF Monde', value: '393,88 €', weight: '64,2 %', change: '+4,56 %', positive: true },
-  { name: 'iShares MSCI World Small Cap', ticker: 'WSML', isin: 'IE00BF4RFH31', type: 'ETF Small Caps', value: '74,20 €', weight: '12,1 %', change: '+1,12 %', positive: true },
-  { name: 'QDF · Qualité Décotée France', ticker: 'QDF', isin: '—', type: 'Poche gérée', value: '47,92 €', weight: '7,8 %', change: '−4,17 %', positive: false },
-  { name: 'Tactile Systems Technology', ticker: 'TCMD', isin: 'US87357P1003', type: 'Action individuelle', value: '31,82 €', weight: '5,2 %', change: '+2,41 %', positive: true },
-  { name: 'Air Liquide', ticker: 'AI', isin: 'FR0000120073', type: 'Action individuelle', value: '24,56 €', weight: '4,0 %', change: '+0,88 %', positive: true },
-]
-
 function euro(value: number) {
   return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(value)
 }
@@ -88,10 +64,17 @@ function App() {
   const [suggestedPurchase, setSuggestedPurchase] = useState<{ assetClass: AssetClass; amount: number } | null>(null)
   const [backupMessage, setBackupMessage] = useState<string | null>(null)
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null)
+  const [importMessage, setImportMessage] = useState<string | null>(null)
+  const [isPdfImporting, setIsPdfImporting] = useState(false)
   const snapshot = portfolioData ? calculatePortfolio(portfolioData) : null
   const portfolioIssues = portfolioData ? validatePortfolio(portfolioData) : []
-  const overviewAllocation = snapshot ? toAllocationDisplay(snapshot) : allocation
-  const overviewPositions = snapshot ? toPositionDisplay(snapshot) : positions
+  const overviewAllocation = snapshot ? toAllocationDisplay(snapshot) : []
+  const overviewPositions = snapshot ? toPositionDisplay(snapshot) : []
+  const overviewPerformance = (portfolioData?.history?.length ?? 0) > 0
+    ? (portfolioData?.history ?? []).map((point) => ({ date: new Date(point.recordedAt).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' }), value: point.totalValue }))
+    : snapshot
+      ? [{ date: 'Aujourd’hui', value: snapshot.totalValue }]
+      : []
 
   const initializePortfolio = () => {
     const data = recordPortfolioHistory(portfolioData ?? createLocalPortfolio())
@@ -102,7 +85,8 @@ function App() {
 
   const persistPortfolio = (data: PortfolioData) => {
     const nextData = recordPortfolioHistory(data)
-    persistPortfolio(nextData)
+    savePortfolioData(nextData)
+    setPortfolioData(nextData)
   }
 
   const startTransaction = () => {
@@ -128,15 +112,16 @@ function App() {
     const quantity = positiveNumber(form.get('quantity'))
     const unitPrice = positiveNumber(form.get('unitPrice'))
     const providedGrossAmount = positiveNumber(form.get('grossAmount'))
-    const grossAmount = providedGrossAmount ?? (quantity && unitPrice ? quantity * unitPrice : undefined)
-    const fees = positiveNumber(form.get('fees')) ?? 0
     const isSecurity = kind === 'Achat' || kind === 'Vente'
+    const grossAmount = providedGrossAmount
+      ?? (quantity && unitPrice ? quantity * unitPrice : undefined)
+      ?? (!isSecurity ? unitPrice : undefined)
+    const fees = positiveNumber(form.get('fees')) ?? 0
     if (!grossAmount || (isSecurity && !quantity)) return
     const transaction: Transaction = { id: editingTransaction?.id ?? `manual-${crypto.randomUUID()}`, occurredOn: String(form.get('occurredOn')), kind, instrumentName: String(form.get('instrumentName')).trim(), ticker: optionalFormText(form.get('ticker')), isin: optionalFormText(form.get('isin')), quantity, unitPrice, grossAmount, fees, cashFlow: calculateManualCashFlow(kind, grossAmount, fees), assetClass: form.get('assetClass') as AssetClass, note: optionalFormText(form.get('note')) }
     const updatedTransactions = editingTransaction ? currentData.transactions.map((candidate) => candidate.id === transaction.id ? transaction : candidate) : [...currentData.transactions, transaction]
     const nextData = addAuditEntry({ ...currentData, transactions: updatedTransactions }, { action: editingTransaction ? 'update' : 'create', detail: `${editingTransaction ? 'Correction' : 'Ajout'} de l’opération ${transaction.instrumentName}`, transactionId: transaction.id })
-    savePortfolioData(nextData)
-    setPortfolioData(nextData)
+    persistPortfolio(nextData)
     setIsTransactionDialogOpen(false)
     setEditingTransaction(null)
     setActive('Journal des transactions')
@@ -170,6 +155,325 @@ function App() {
     const constituents = editingQdf ? currentData.qdfConstituents.map((item) => item.ticker === editingQdf.ticker ? { ...item, ...constituent } : item) : [...currentData.qdfConstituents, constituent]
     persistPortfolio(addAuditEntry({ ...currentData, qdfConstituents: constituents }, { action: editingQdf ? 'update' : 'create', detail: `${editingQdf ? 'Mise à jour' : 'Ajout'} du constituant QDF ${ticker}` }))
     setEditingQdf(null)
+  }
+
+  const importIgOrdersFromPaste = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const currentData = portfolioData ?? initializePortfolio()
+    const form = new FormData(event.currentTarget)
+    const raw = String(form.get('igPaste') ?? '').trim()
+    const fallbackAssetClass = String(form.get('fallbackAssetClass') ?? 'Non classé') as AssetClass
+    if (!raw) {
+      setImportMessage('Collez d’abord le tableau IG (onglet Exécutés).')
+      return
+    }
+
+    const parsedRows = parseIgExecutedOrdersPaste(raw)
+    if (parsedRows.length === 0) {
+      setImportMessage('Aucune ligne exploitable détectée. Copiez les lignes du tableau IG incluant les colonnes Entreprise, Quantité, Type et prix, Exécuté.')
+      return
+    }
+
+    const existingFingerprints = new Set(currentData.transactions.map((transaction) => `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|${transaction.quantity ?? 0}|${transaction.grossAmount}`))
+    const importedTransactions = parsedRows
+      .map((row) => {
+        const assetClass = inferAssetClassFromName(row.instrumentName, fallbackAssetClass)
+        const grossAmount = row.grossAmount
+        const quantity = row.quantity
+        const unitPrice = row.unitPrice ?? (quantity > 0 ? grossAmount / quantity : undefined)
+        const kind: TransactionKind = row.kind
+        return {
+          id: `manual-${crypto.randomUUID()}`,
+          occurredOn: row.occurredOn,
+          kind,
+          instrumentName: row.instrumentName,
+          quantity,
+          unitPrice,
+          grossAmount,
+          fees: 0,
+          cashFlow: calculateManualCashFlow(kind, grossAmount, 0),
+          assetClass,
+          note: 'Import IG par collage',
+        } as Transaction
+      })
+      .filter((transaction) => {
+        const fingerprint = `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|${transaction.quantity ?? 0}|${transaction.grossAmount}`
+        if (existingFingerprints.has(fingerprint)) return false
+        existingFingerprints.add(fingerprint)
+        return true
+      })
+
+    if (importedTransactions.length === 0) {
+      setImportMessage('Les lignes collées existent déjà dans le journal local.')
+      return
+    }
+
+    const netCashFlow = importedTransactions.reduce((sum, transaction) => sum + transaction.cashFlow, 0)
+    const transactionsToAppend = [...importedTransactions]
+    if (netCashFlow < 0) {
+      transactionsToAppend.push({
+        id: `manual-${crypto.randomUUID()}`,
+        occurredOn: importedTransactions[0]?.occurredOn ?? new Date().toISOString().slice(0, 10),
+        kind: 'Dépôt',
+        instrumentName: 'Alimentation cash (auto import IG)',
+        grossAmount: Math.abs(netCashFlow),
+        fees: 0,
+        cashFlow: Math.abs(netCashFlow),
+        assetClass: 'Liquidités',
+        note: 'Ajustement automatique pour refléter un portefeuille valorisable sans historique des dépôts IG.',
+      })
+    }
+
+    const nextData = addAuditEntry({ ...currentData, transactions: [...currentData.transactions, ...transactionsToAppend] }, { action: 'create', detail: `Import IG par collage: ${importedTransactions.length} opération(s)` })
+    persistPortfolio(nextData)
+    setImportMessage(`${importedTransactions.length} opération(s) importée(s)${netCashFlow < 0 ? ' + dépôt auto de compensation cash' : ''}.`)
+    setActive('Journal des transactions')
+  }
+
+  const importIgPricesFromPaste = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const currentData = portfolioData ?? initializePortfolio()
+    const form = new FormData(event.currentTarget)
+    const raw = String(form.get('igPricesPaste') ?? '').trim()
+    if (!raw) {
+      setImportMessage('Collez d’abord le tableau IG Vos avoirs.')
+      return
+    }
+
+    const rows = parseIgHoldingsPaste(raw)
+    if (rows.length === 0) {
+      setImportMessage('Aucun cours détecté. Copiez les lignes du tableau Vos avoirs incluant Titres et Prix actuel.')
+      return
+    }
+
+    const snapshot = calculatePortfolio(currentData)
+    const candidatePositions = [
+      ...snapshot.positions.filter((position) => position.id !== 'QDF'),
+      ...calculateQdfHoldings(currentData),
+    ]
+    const updates: Record<string, { value: number; updatedAt: string }> = { ...(currentData.marketPrices ?? {}) }
+    let updatedCount = 0
+    let unmatchedCount = 0
+
+    for (const row of rows) {
+      const position = findPositionForHoldingRow(candidatePositions, row)
+      if (!position) {
+        unmatchedCount += 1
+        continue
+      }
+      updates[position.id] = { value: row.marketPrice, updatedAt: new Date().toISOString() }
+      updatedCount += 1
+    }
+
+    if (updatedCount === 0) {
+      setImportMessage('Aucun instrument du collage ne correspond aux positions locales.')
+      return
+    }
+
+    const nextData = addAuditEntry({ ...currentData, marketPrices: updates }, { action: 'price', detail: `Import IG des cours: ${updatedCount} cours mis à jour${unmatchedCount ? `, ${unmatchedCount} ligne(s) non appariée(s)` : ''}` })
+    persistPortfolio(nextData)
+    setImportMessage(`${updatedCount} cours mis à jour${unmatchedCount ? ` · ${unmatchedCount} ligne(s) ignorée(s)` : ''}.`)
+    setActive('Cours')
+  }
+
+  const importIgCashHistoryFromPaste = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const currentData = portfolioData ?? initializePortfolio()
+    const form = new FormData(event.currentTarget)
+    const raw = String(form.get('igCashPaste') ?? '').trim()
+    if (!raw) {
+      setImportMessage('Collez d’abord l’historique de trésorerie IG.')
+      return
+    }
+
+    const rows = parseIgCashHistoryPaste(raw)
+    const depositRows = rows.filter((row) => row.kind === 'Dépôt' && row.amount > 0)
+    if (depositRows.length === 0) {
+      setImportMessage('Aucun dépôt exploitable détecté dans l’historique collé.')
+      return
+    }
+
+    const existingFingerprints = new Set(currentData.transactions.map((transaction) => `${transaction.occurredOn}|${transaction.kind}|${transaction.grossAmount}|${transaction.instrumentName}`))
+    const depositsToImport: Transaction[] = []
+    for (const row of depositRows) {
+      const transaction: Transaction = {
+        id: `manual-${crypto.randomUUID()}`,
+        occurredOn: row.occurredOn,
+        kind: 'Dépôt',
+        instrumentName: 'Dépôt IG (historique trésorerie)',
+        grossAmount: row.amount,
+        fees: 0,
+        cashFlow: row.amount,
+        assetClass: 'Liquidités',
+        note: 'Import historique trésorerie IG',
+      }
+      const fingerprint = `${transaction.occurredOn}|${transaction.kind}|${transaction.grossAmount}|${transaction.instrumentName}`
+      if (existingFingerprints.has(fingerprint)) continue
+      existingFingerprints.add(fingerprint)
+      depositsToImport.push(transaction)
+    }
+
+    if (depositsToImport.length === 0) {
+      setImportMessage('Les dépôts de cet historique sont déjà présents.')
+      return
+    }
+
+    const nextData = addAuditEntry({ ...currentData, transactions: [...currentData.transactions, ...depositsToImport] }, { action: 'create', detail: `Import historique trésorerie IG: ${depositsToImport.length} dépôt(s)` })
+    persistPortfolio(nextData)
+    setImportMessage(`${depositsToImport.length} dépôt(s) importé(s) depuis l’historique de trésorerie IG.`)
+    setActive('Rééquilibrage')
+  }
+
+  const importIgStatementsFromPdf = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const formElement = event.currentTarget
+    const currentData = portfolioData ?? initializePortfolio()
+    const form = new FormData(formElement)
+    const fallbackAssetClass = String(form.get('fallbackAssetClass') ?? 'ETF Maison') as AssetClass
+    const files = form.getAll('statementPdfs').filter((entry): entry is File => entry instanceof File && entry.size > 0)
+    const uniqueFiles = Array.from(new Map(files.map((file) => [`${file.name}|${file.size}`, file] as const)).values())
+
+    if (uniqueFiles.length === 0) {
+      setImportMessage('Sélectionnez au moins un relevé PDF IG.')
+      return
+    }
+
+    setIsPdfImporting(true)
+
+    try {
+      const parsedOrders: Array<{ instrumentName: string; isin?: string; quantity: number; grossAmount: number; unitPrice?: number; occurredOn: string; kind: TransactionKind }> = []
+      const parsedCashRows: Array<{ kind: 'Dépôt' | 'Retrait'; amount: number; occurredOn: string }> = []
+      let unreadableFiles = 0
+      let ignoredFiles = 0
+      const typeCounters: Record<'QUARTERLY' | 'ACCOUNT_OPENING' | 'ORDER_EX_ANTE_COST' | 'CANCELLED_ORDER' | 'BUY_ORDER' | 'SELL_ORDER' | 'UNKNOWN', number> = {
+        QUARTERLY: 0,
+        ACCOUNT_OPENING: 0,
+        ORDER_EX_ANTE_COST: 0,
+        CANCELLED_ORDER: 0,
+        BUY_ORDER: 0,
+        SELL_ORDER: 0,
+        UNKNOWN: 0,
+      }
+
+      for (const file of uniqueFiles) {
+        const fileType = detectIgPdfType(file.name)
+        typeCounters[fileType] += 1
+
+        if (fileType === 'ORDER_EX_ANTE_COST' || fileType === 'CANCELLED_ORDER') {
+          ignoredFiles += 1
+          continue
+        }
+
+        try {
+          const text = await extractTextFromPdfFile(file)
+
+          if (fileType === 'BUY_ORDER' || fileType === 'SELL_ORDER') {
+            const fromStatement = parseIgOrderStatementPdfText(text, fileType === 'SELL_ORDER' ? 'Vente' : 'Achat')
+            parsedOrders.push(...fromStatement)
+            continue
+          }
+
+          if (fileType === 'ACCOUNT_OPENING') {
+            parsedCashRows.push(...parseIgCashHistoryPaste(text))
+            continue
+          }
+
+          parsedOrders.push(...parseIgExecutedOrdersPaste(text))
+          parsedCashRows.push(...parseIgCashHistoryPaste(text))
+        } catch {
+          unreadableFiles += 1
+        }
+      }
+
+      const existingFingerprints = new Set(currentData.transactions.map((transaction) => `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|${transaction.quantity ?? 0}|${transaction.grossAmount}`))
+      const transactionsToAppend: Transaction[] = []
+
+      for (const row of parsedOrders) {
+        const assetClass = inferAssetClassFromName(row.instrumentName, fallbackAssetClass)
+        const quantity = row.quantity
+        const grossAmount = row.grossAmount
+        const unitPrice = row.unitPrice ?? (quantity > 0 ? grossAmount / quantity : undefined)
+
+        const transaction: Transaction = {
+          id: `manual-${crypto.randomUUID()}`,
+          occurredOn: row.occurredOn,
+          kind: row.kind,
+          instrumentName: row.instrumentName,
+          isin: row.isin,
+          quantity,
+          unitPrice,
+          grossAmount,
+          fees: 0,
+          cashFlow: calculateManualCashFlow(row.kind, grossAmount, 0),
+          assetClass,
+          note: 'Import relevé PDF IG',
+        }
+
+        const fingerprint = `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|${transaction.quantity ?? 0}|${transaction.grossAmount}`
+        if (existingFingerprints.has(fingerprint)) continue
+        existingFingerprints.add(fingerprint)
+        transactionsToAppend.push(transaction)
+      }
+
+      for (const row of parsedCashRows) {
+        const isDeposit = row.kind === 'Dépôt'
+        const grossAmount = row.amount
+        const transaction: Transaction = {
+          id: `manual-${crypto.randomUUID()}`,
+          occurredOn: row.occurredOn,
+          kind: isDeposit ? 'Dépôt' : 'Autre',
+          instrumentName: isDeposit ? 'Dépôt IG (relevé PDF)' : 'Retrait IG (relevé PDF)',
+          grossAmount,
+          fees: 0,
+          cashFlow: isDeposit ? grossAmount : -grossAmount,
+          assetClass: 'Liquidités',
+          note: 'Import relevé PDF IG',
+        }
+
+        const fingerprint = `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|0|${transaction.grossAmount}`
+        if (existingFingerprints.has(fingerprint)) continue
+        existingFingerprints.add(fingerprint)
+        transactionsToAppend.push(transaction)
+      }
+
+      if (transactionsToAppend.length === 0) {
+        setImportMessage(`Aucune nouvelle transaction détectée. PDF analysés: ${uniqueFiles.length}${ignoredFiles ? `, ${ignoredFiles} ignoré(s) (Ex Ante / Ordre annulé)` : ''}${unreadableFiles ? `, ${unreadableFiles} illisible(s)` : ''}.`)
+        return
+      }
+
+      const typeSummary = [
+        typeCounters.QUARTERLY ? `${typeCounters.QUARTERLY} trimestriel(s)` : null,
+        typeCounters.ACCOUNT_OPENING ? `${typeCounters.ACCOUNT_OPENING} ouverture(s)` : null,
+        typeCounters.BUY_ORDER ? `${typeCounters.BUY_ORDER} achat(s)` : null,
+        typeCounters.SELL_ORDER ? `${typeCounters.SELL_ORDER} vente(s)` : null,
+        typeCounters.ORDER_EX_ANTE_COST ? `${typeCounters.ORDER_EX_ANTE_COST} ex-ante` : null,
+        typeCounters.CANCELLED_ORDER ? `${typeCounters.CANCELLED_ORDER} ordre(s) annulé(s)` : null,
+        typeCounters.UNKNOWN ? `${typeCounters.UNKNOWN} inconnu(s)` : null,
+      ].filter(Boolean).join(', ')
+
+      const nextData = addAuditEntry(
+        { ...currentData, transactions: [...currentData.transactions, ...transactionsToAppend] },
+        {
+          action: 'create',
+          detail: `Import relevés PDF IG: ${transactionsToAppend.length} transaction(s) depuis ${uniqueFiles.length} fichier(s)${ignoredFiles ? `, ${ignoredFiles} ignoré(s)` : ''}${unreadableFiles ? `, ${unreadableFiles} illisible(s)` : ''}${typeSummary ? ` · Types: ${typeSummary}` : ''}`,
+        },
+      )
+      persistPortfolio(normalizePortfolioData(nextData))
+      setImportMessage(`${transactionsToAppend.length} transaction(s) importée(s) depuis ${uniqueFiles.length} PDF${ignoredFiles ? ` · ${ignoredFiles} ignoré(s) (Ex Ante / Ordre annulé)` : ''}${unreadableFiles ? ` · ${unreadableFiles} non lisible(s)` : ''}${typeSummary ? ` · ${typeSummary}` : ''}.`)
+      setActive('Journal des transactions')
+      formElement.reset()
+    } finally {
+      setIsPdfImporting(false)
+    }
+  }
+
+  const resetLocalPortfolio = () => {
+    window.localStorage.removeItem('ig-portefeuille-data')
+    setPortfolioData(null)
+    setImportMessage('Données locales supprimées. Portefeuille réinitialisé.')
+    setBackupMessage(null)
+    setSettingsMessage(null)
+    setActive('Données locales')
   }
   const disableQdfConstituent = (ticker: string) => {
     if (!portfolioData) return
@@ -255,24 +559,24 @@ function App() {
         <section className="hero-grid">
           <article className="card balance-card">
             <div className="card-label"><Wallet size={16} /> Valeur du portefeuille</div>
-            <div className="balance">{euro(snapshot?.totalValue ?? 613.8)}</div>
-            <div className={`gain ${snapshot && snapshot.unrealizedGainLoss < 0 ? 'negative' : ''}`}><ArrowUpRight size={16} /> <strong>{snapshot ? signedEuro(snapshot.unrealizedGainLoss) : '+63,70 €'}</strong> gain latent <span>{snapshot ? formatPercent(snapshot.totalCostBasis === 0 ? 0 : snapshot.unrealizedGainLoss / snapshot.totalCostBasis) : '+11,58 %'}</span></div>
-            <div className="balance-foot"><span>Coût de revient <strong>{snapshot ? euro(snapshot.totalCostBasis) : '550,10 €'}</strong></span><span>Liquidités <strong>{snapshot ? euro(snapshot.cash) : '41,43 €'}</strong></span></div>
+            <div className="balance">{euro(snapshot?.totalValue ?? 0)}</div>
+            <div className={`gain ${snapshot && snapshot.unrealizedGainLoss < 0 ? 'negative' : ''}`}><ArrowUpRight size={16} /> <strong>{snapshot ? signedEuro(snapshot.unrealizedGainLoss) : signedEuro(0)}</strong> gain latent <span>{snapshot ? formatPercent(snapshot.totalCostBasis === 0 ? 0 : snapshot.unrealizedGainLoss / snapshot.totalCostBasis) : formatPercent(0)}</span></div>
+            <div className="balance-foot"><span>Coût de revient <strong>{snapshot ? euro(snapshot.totalCostBasis) : euro(0)}</strong></span><span>Liquidités <strong>{snapshot ? euro(snapshot.cash) : euro(0)}</strong></span></div>
           </article>
 
           <article className="card chart-card">
-            <div className="card-heading"><div><span className="card-label">Évolution</span><strong>6 derniers mois</strong></div><button className="icon-button"><MoreHorizontal size={19} /></button></div>
-            <div className="chart-wrap">
+            <div className="card-heading"><div><span className="card-label">Évolution</span><strong>Historique local</strong></div><button className="icon-button"><MoreHorizontal size={19} /></button></div>
+            {overviewPerformance.length > 0 ? <div className="chart-wrap">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={performance} margin={{ top: 8, right: 0, bottom: 0, left: -28 }}>
+                <AreaChart data={overviewPerformance} margin={{ top: 8, right: 0, bottom: 0, left: -28 }}>
                   <defs><linearGradient id="portfolioFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#7c9cff" stopOpacity={0.3} /><stop offset="100%" stopColor="#7c9cff" stopOpacity={0} /></linearGradient></defs>
                   <XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fill: '#737b91', fontSize: 11 }} />
-                  <YAxis tickLine={false} axisLine={false} tick={{ fill: '#737b91', fontSize: 11 }} domain={[450, 650]} />
+                  <YAxis tickLine={false} axisLine={false} tick={{ fill: '#737b91', fontSize: 11 }} domain={['auto', 'auto']} />
                   <Tooltip contentStyle={{ background: '#1a1e29', border: '1px solid #2b3141', borderRadius: 10 }} labelStyle={{ color: '#aab2c5' }} formatter={(value) => [euro(Number(value)), 'Valeur']} />
                   <Area type="monotone" dataKey="value" stroke="#8ca8ff" strokeWidth={2.5} fill="url(#portfolioFill)" />
                 </AreaChart>
               </ResponsiveContainer>
-            </div>
+            </div> : <div className="empty-journal"><BarChart3 size={24} /><strong>Aucun historique</strong><p>Importez des relevés PDF ou ajoutez une opération pour créer des points d’évolution.</p></div>}
           </article>
         </section>
 
@@ -280,7 +584,7 @@ function App() {
           <article className="card allocation-card">
             <div className="card-heading"><div><span className="card-label">Allocation</span><strong>Répartition actuelle</strong></div><button className="text-button" onClick={() => setActive('Rééquilibrage')}>Voir le détail</button></div>
             <div className="allocation-body">
-              <div className="donut"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={overviewAllocation} dataKey="value" innerRadius={58} outerRadius={78} paddingAngle={3} stroke="none">{overviewAllocation.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip contentStyle={{ background: '#1a1e29', border: '1px solid #2b3141', borderRadius: 10 }} formatter={(value) => [`${value} %`, 'Poids']} /></PieChart></ResponsiveContainer><div className="donut-label"><strong>5</strong><span>poches</span></div></div>
+              <div className="donut"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={overviewAllocation} dataKey="value" innerRadius={58} outerRadius={78} paddingAngle={3} stroke="none">{overviewAllocation.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip contentStyle={{ background: '#1a1e29', border: '1px solid #2b3141', borderRadius: 10 }} formatter={(value) => [`${value} %`, 'Poids']} /></PieChart></ResponsiveContainer><div className="donut-label"><strong>{overviewAllocation.length}</strong><span>poches</span></div></div>
               <div className="legend">{overviewAllocation.map((item) => <div className="legend-row" key={item.name}><span className="legend-name"><i style={{ background: item.color }} />{item.name}</span><span><b>{item.value.toFixed(1).replace('.', ',')} %</b><small>Cible {item.target} %</small></span></div>)}</div>
             </div>
           </article>
@@ -288,8 +592,8 @@ function App() {
           <article className="card insight-card">
             <div className="card-heading"><div><span className="card-label">À surveiller</span><strong>Prochaines actions</strong></div><CircleHelp size={17} className="muted" /></div>
             <div className="insight-list">
-              <div className="insight"><div className="insight-icon purple"><Sparkles size={17} /></div><div><strong>QDF est sous sa cible</strong><p>{snapshot ? `Il manque ${euro(snapshot.rebalancing.find((item) => item.assetClass === 'ETF Maison')?.deficit ?? 0)} pour atteindre sa cible.` : 'Il manque 13,46 € pour atteindre 10 %.'}</p></div><ArrowUpRight size={17} /></div>
-              <div className="insight"><div className="insight-icon amber"><Wallet size={17} /></div><div><strong>Réserve cash au-dessus du seuil</strong><p>{snapshot ? `${euro(snapshot.investableCash)} mobilisables après la réserve.` : '10,74 € mobilisables après la réserve.'}</p></div><ArrowUpRight size={17} /></div>
+              <div className="insight"><div className="insight-icon purple"><Sparkles size={17} /></div><div><strong>QDF est sous sa cible</strong><p>{snapshot ? `Il manque ${euro(snapshot.rebalancing.find((item) => item.assetClass === 'ETF Maison')?.deficit ?? 0)} pour atteindre sa cible.` : 'Importez vos relevés PDF pour calculer les écarts de cible.'}</p></div><ArrowUpRight size={17} /></div>
+              <div className="insight"><div className="insight-icon amber"><Wallet size={17} /></div><div><strong>Réserve cash au-dessus du seuil</strong><p>{snapshot ? `${euro(snapshot.investableCash)} mobilisables après la réserve.` : 'Aucun cash mobilisable tant qu’aucune opération n’est importée.'}</p></div><ArrowUpRight size={17} /></div>
               <div className="insight"><div className="insight-icon green"><RefreshCw size={17} /></div><div><strong>Revue QDF à préparer</strong><p>Prochaine revue complète : 30 septembre.</p></div><ArrowUpRight size={17} /></div>
             </div>
           </article>
@@ -297,7 +601,7 @@ function App() {
 
         <section className="card positions-card">
           <div className="card-heading"><div><span className="card-label">Portefeuille</span><strong>Positions principales</strong></div><button className="text-button" onClick={() => setActive('Positions')}>Toutes les positions</button></div>
-          <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>ISIN</th><th>Catégorie</th><th className="align-right">Valeur</th><th className="align-right">Poids</th><th className="align-right">Performance</th><th /></tr></thead><tbody>{overviewPositions.map((position) => <tr key={position.ticker}><td><div className="instrument"><span className="ticker">{position.ticker}</span><div><strong>{position.name}</strong><small>{position.ticker}</small></div></div></td><td>{position.isin ?? '—'}</td><td><span className="tag">{position.type}</span></td><td className="align-right value">{position.value}</td><td className="align-right">{position.weight}</td><td className={`align-right performance ${position.positive ? 'positive' : 'negative'}`}>{position.positive ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}{position.change}</td><td className="align-right"><button className="icon-button"><MoreHorizontal size={18} /></button></td></tr>)}</tbody></table></div>
+          {overviewPositions.length > 0 ? <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>ISIN</th><th>Catégorie</th><th className="align-right">Valeur</th><th className="align-right">Poids</th><th className="align-right">Performance</th><th /></tr></thead><tbody>{overviewPositions.map((position) => <tr key={position.id}><td><div className="instrument"><span className="ticker">{position.ticker}</span><div><strong>{position.name}</strong><small>{position.ticker}</small></div></div></td><td>{position.isin ?? '—'}</td><td><span className="tag">{position.type}</span></td><td className="align-right value">{position.value}</td><td className="align-right">{position.weight}</td><td className={`align-right performance ${position.positive ? 'positive' : 'negative'}`}>{position.positive ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}{position.change}</td><td className="align-right"><button className="icon-button"><MoreHorizontal size={18} /></button></td></tr>)}</tbody></table></div> : <div className="empty-journal"><BriefcaseBusiness size={24} /><strong>Aucune position</strong><p>Importez vos relevés PDF pour afficher les positions.</p></div>}
         </section>
         </>}
 
@@ -308,7 +612,7 @@ function App() {
         {active === 'Rééquilibrage' && <RebalancingView snapshot={snapshot} onPrepare={prepareSuggestedPurchase} />}
         {active === 'Historique' && <HistoryView data={portfolioData} />}
         {active === 'Contrôles' && <LocalControlsView issues={portfolioIssues} hasData={Boolean(portfolioData)} />}
-        {active === 'Données locales' && <LocalDataView data={portfolioData} onInitialize={initializePortfolio} onRestore={restoreBackup} message={backupMessage} />}
+        {active === 'Données locales' && <PdfStatementsDataView data={portfolioData} importMessage={importMessage} isImporting={isPdfImporting} onImportPdf={importIgStatementsFromPdf} onReset={resetLocalPortfolio} />}
         {active === 'Paramètres' && <SettingsView data={portfolioData} onSave={saveSettings} message={settingsMessage} />}
       </section>
       {isTransactionDialogOpen && (editingTransaction ? <EditTransactionDialog transaction={editingTransaction} onClose={() => { setIsTransactionDialogOpen(false); setEditingTransaction(null) }} onSubmit={addManualTransaction} /> : <ManualTransactionDialog suggestedPurchase={suggestedPurchase} onClose={() => { setIsTransactionDialogOpen(false); setEditingTransaction(null); setSuggestedPurchase(null) }} onSubmit={addManualTransaction} />)}
@@ -390,7 +694,7 @@ function LocalPositionsView({ snapshot }: { snapshot: PortfolioSnapshot | null }
 function LocalQdfView({ data, snapshot, onSavePrice, onEdit, onDisable, onAdd }: { data: PortfolioData | null; snapshot: PortfolioSnapshot | null; onSavePrice: (instrumentId: string, price: number) => void; onEdit: (item: QdfConstituent) => void; onDisable: (ticker: string) => void; onAdd: () => void }) {
   const holdings = data ? calculateQdfHoldings(data) : []
   const constituents = data?.qdfConstituents.filter((item) => item.status === 'Actif').sort((left, right) => (left.rank ?? 999) - (right.rank ?? 999)) ?? []
-  return <section className="page-stack"><article className="card page-card"><div className="card-heading"><div><span className="card-label">Poche gérée</span><strong>Qualité Décotée France</strong></div><button className="button primary" onClick={onAdd}><Plus size={16} /> Ajouter un titre</button></div><p className="page-intro">Gérez les titres, leurs pondérations et leurs cours. Les cours ne valorisent une ligne que lorsqu’une opération d’achat existe.</p>{constituents.length ? <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>ISIN</th><th>Cible</th><th>Quantité</th><th className="align-right">Cours</th><th className="align-right">Valeur</th><th /></tr></thead><tbody>{constituents.map((item) => { const holding = holdings.find((position) => position.ticker === item.ticker); const savedPrice = holding ? data?.marketPrices?.[holding.id] : undefined; return <tr key={item.ticker}><td><div className="transaction-instrument"><strong>{item.company}</strong><small>{item.ticker}{item.sector ? ` · ${item.sector}` : ''}</small></div></td><td>{item.isin ?? '—'}</td><td>{formatPercent(item.targetWeight)}</td><td>{holding?.quantity.toLocaleString('fr-FR', { maximumFractionDigits: 4 }) ?? '—'}</td><td className="align-right">{holding ? <form className="price-form" onSubmit={(event) => { event.preventDefault(); onSavePrice(holding.id, Number(new FormData(event.currentTarget).get('price'))) }}><input name="price" type="number" min="0.000001" step="any" defaultValue={savedPrice?.value ?? holding.marketPrice} aria-label={`Cours ${item.company}`} required /><button className="button secondary" type="submit">OK</button></form> : '—'}</td><td className="align-right value">{holding ? euro(holding.marketValue) : '—'}</td><td className="align-right"><button className="text-button" onClick={() => onEdit(item)}>Modifier</button><button className="text-button danger-button" onClick={() => onDisable(item.ticker)}>Désactiver</button></td></tr> })}</tbody></table></div> : <div className="empty-journal"><Layers3 size={24} /><strong>Aucun constituant QDF</strong><p>Ajoutez les titres suivis dans la poche QDF.</p></div>}</article>{snapshot && <article className="card metric"><span>Valeur de la poche QDF</span><strong>{euro(snapshot.positions.find((position) => position.id === 'QDF')?.marketValue ?? 0)}</strong></article>}</section>
+  return <section className="page-stack"><article className="card page-card"><div className="card-heading"><div><span className="card-label">Poche gérée</span><strong>Qualité Décotée France</strong></div><button className="button primary" onClick={onAdd}><Plus size={16} /> Ajouter un titre</button></div><p className="page-intro">Gérez les titres, leurs pondérations et leurs cours. Les cours ne valorisent une ligne que lorsqu’une opération d’achat existe.</p>{constituents.length ? <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>ISIN</th><th>Cible</th><th>Quantité</th><th className="align-right">Cours</th><th className="align-right">Valeur</th><th /></tr></thead><tbody>{constituents.map((item) => { const holding = holdings.find((position) => position.ticker === item.ticker || normalizeLabel(position.name) === normalizeLabel(item.company)); const savedPrice = holding ? data?.marketPrices?.[holding.id] : undefined; return <tr key={item.ticker}><td><div className="transaction-instrument"><strong>{item.company}</strong><small>{item.ticker}{item.sector ? ` · ${item.sector}` : ''}</small></div></td><td>{item.isin ?? '—'}</td><td>{formatPercent(item.targetWeight)}</td><td>{holding ? formatQuantity(holding.quantity) : '—'}</td><td className="align-right">{holding ? <form className="price-form" onSubmit={(event) => { event.preventDefault(); onSavePrice(holding.id, Number(new FormData(event.currentTarget).get('price'))) }}><input name="price" type="number" min="0.000001" step="any" defaultValue={savedPrice?.value ?? holding.marketPrice} aria-label={`Cours ${item.company}`} required /><button className="button secondary" type="submit">OK</button></form> : '—'}</td><td className="align-right value">{holding ? euro(holding.marketValue) : '—'}</td><td className="align-right"><button className="text-button" onClick={() => onEdit(item)}>Modifier</button><button className="text-button danger-button" onClick={() => onDisable(item.ticker)}>Désactiver</button></td></tr> })}</tbody></table></div> : <div className="empty-journal"><Layers3 size={24} /><strong>Aucun constituant QDF</strong><p>Ajoutez les titres suivis dans la poche QDF.</p></div>}</article>{snapshot && <article className="card metric"><span>Valeur de la poche QDF</span><strong>{euro(snapshot.positions.find((position) => position.id === 'QDF')?.marketValue ?? 0)}</strong></article>}</section>
 }
 
 function QdfConstituentDialog({ constituent, onClose, onSubmit }: { constituent: QdfConstituent; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
@@ -405,11 +709,15 @@ function LocalControlsView({ issues, hasData }: { issues: ReturnType<typeof vali
 function MarketPricesView({ data, snapshot, onSave }: { data: PortfolioData | null; snapshot: PortfolioSnapshot | null; onSave: (instrumentId: string, price: number) => void }) {
   if (!data || !snapshot) return <section className="card page-card"><div className="empty-journal"><RefreshCw size={24} /><strong>Aucun cours à renseigner</strong><p>Ajoutez d’abord un dépôt puis une opération d’achat pour faire apparaître une position.</p></div></section>
   const positions = snapshot.positions.filter((position) => position.id !== 'QDF')
-  return <section className="page-stack"><article className="card page-card"><div className="card-heading"><div><span className="card-label">Valorisation locale</span><strong>Saisir les cours</strong></div><span className="tag">Aucune connexion externe</span></div><p className="page-intro">Saisissez le dernier cours connu de chaque position. La valorisation et la performance sont recalculées immédiatement dans ce navigateur.</p><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>ISIN</th><th>Quantité</th><th className="align-right">Cours utilisé</th><th>Dernière mise à jour</th><th className="align-right">Nouveau cours (€)</th><th /></tr></thead><tbody>{positions.map((position) => { const price = data.marketPrices?.[position.id]; return <tr key={position.id}><td><div className="transaction-instrument"><strong>{position.name}</strong><small>{position.ticker ?? '—'}</small></div></td><td>{position.isin ?? '—'}</td><td>{position.quantity.toLocaleString('fr-FR', { maximumFractionDigits: 4 })}</td><td className="align-right value">{euro(position.marketPrice)}</td><td>{price ? new Date(price.updatedAt).toLocaleString('fr-FR') : 'Prix de la dernière opération'}</td><td className="align-right"><form className="price-form" onSubmit={(event) => { event.preventDefault(); const value = new FormData(event.currentTarget).get('price'); onSave(position.id, Number(value)); }}><input name="price" type="number" min="0.000001" step="any" defaultValue={price?.value ?? position.marketPrice} aria-label={`Cours ${position.name}`} required /><button className="button secondary" type="submit">Enregistrer</button></form></td></tr> })}</tbody></table></div></article></section>
+  return <section className="page-stack"><article className="card page-card"><div className="card-heading"><div><span className="card-label">Valorisation locale</span><strong>Saisir les cours</strong></div><span className="tag">Aucune connexion externe</span></div><p className="page-intro">Saisissez le dernier cours connu de chaque position. La valorisation et la performance sont recalculées immédiatement dans ce navigateur.</p><div className="table-wrap"><table><thead><tr><th>Instrument</th><th>ISIN</th><th>Quantité</th><th className="align-right">Cours utilisé</th><th>Dernière mise à jour</th><th className="align-right">Nouveau cours (€)</th><th /></tr></thead><tbody>{positions.map((position) => { const price = data.marketPrices?.[position.id]; return <tr key={position.id}><td><div className="transaction-instrument"><strong>{position.name}</strong><small>{position.ticker ?? '—'}</small></div></td><td>{position.isin ?? '—'}</td><td>{formatQuantity(position.quantity)}</td><td className="align-right value">{euro(position.marketPrice)}</td><td>{price ? new Date(price.updatedAt).toLocaleString('fr-FR') : 'Prix de la dernière opération'}</td><td className="align-right"><form className="price-form" onSubmit={(event) => { event.preventDefault(); const value = new FormData(event.currentTarget).get('price'); onSave(position.id, Number(value)); }}><input name="price" type="number" min="0.000001" step="any" defaultValue={price?.value ?? position.marketPrice} aria-label={`Cours ${position.name}`} required /><button className="button secondary" type="submit">Enregistrer</button></form></td></tr> })}</tbody></table></div></article></section>
 }
 
-function LocalDataView({ data, onInitialize, onRestore, message }: { data: PortfolioData | null; onInitialize: () => void; onRestore: (event: ChangeEvent<HTMLInputElement>) => void; message: string | null }) {
-  return <section className="page-stack"><article className="card import-hero"><div className="insight-icon purple"><Database size={21} /></div><div><span className="card-label">Portefeuille local</span><strong>Vos données restent dans ce navigateur</strong><p>Ajoutez directement les opérations dans le journal et actualisez les cours dans l’écran dédié.</p></div><span className="tag">Sans import ni API</span></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Démarrage</span><strong>{data ? 'Portefeuille initialisé' : 'Initialiser le portefeuille'}</strong></div>{!data && <button className="button primary" onClick={onInitialize}>Créer un portefeuille vide</button>}</div>{data ? <div className="import-summary"><span><b>{data.transactions.length}</b> opérations locales</span><span><b>{Object.keys(data.marketPrices ?? {}).length}</b> cours saisis</span><span><b>{data.auditLog?.length ?? 0}</b> événements audités</span></div> : <p className="page-intro">Commencez par créer un portefeuille vide, puis enregistrez un dépôt et vos achats dans le journal.</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Sauvegarde</span><strong>Exporter ou restaurer les données</strong></div><span className="tag">JSON local</span></div><p className="page-intro">Conservez une copie JSON avant de vider les données du navigateur ou de changer d’appareil.</p><div className="inline-actions">{data && <button className="button secondary" onClick={() => downloadPortfolioBackup(data)}>Télécharger la sauvegarde</button>}<label className="button secondary" htmlFor="restore-backup">Restaurer une sauvegarde</label><input id="restore-backup" className="file-input" type="file" accept="application/json,.json" onChange={onRestore} /></div>{message && <p className="import-warning">{message}</p>}</article></section>
+function LocalDataView({ data, onInitialize, onRestore, message, importMessage, onImportIgPaste, onImportIgPricesPaste, onImportIgCashPaste }: { data: PortfolioData | null; onInitialize: () => void; onRestore: (event: ChangeEvent<HTMLInputElement>) => void; message: string | null; importMessage: string | null; onImportIgPaste: (event: FormEvent<HTMLFormElement>) => void; onImportIgPricesPaste: (event: FormEvent<HTMLFormElement>) => void; onImportIgCashPaste: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <section className="page-stack"><article className="card import-hero"><div className="insight-icon purple"><Database size={21} /></div><div><span className="card-label">Portefeuille local</span><strong>Vos données restent dans ce navigateur</strong><p>Ajoutez directement les opérations dans le journal et actualisez les cours dans l’écran dédié.</p></div><span className="tag">Sans import API IG</span></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Démarrage</span><strong>{data ? 'Portefeuille initialisé' : 'Initialiser le portefeuille'}</strong></div>{!data && <button className="button primary" onClick={onInitialize}>Créer un portefeuille vide</button>}</div>{data ? <div className="import-summary"><span><b>{data.transactions.length}</b> opérations locales</span><span><b>{Object.keys(data.marketPrices ?? {}).length}</b> cours saisis</span><span><b>{data.auditLog?.length ?? 0}</b> événements audités</span></div> : <p className="page-intro">Commencez par créer un portefeuille vide, puis enregistrez un dépôt et vos achats dans le journal.</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import transactions</span><strong>Coller les ordres exécutés IG</strong></div><span className="tag">Copier / coller</span></div><p className="page-intro">Depuis IG, copiez les lignes du tableau <b>Ordres &gt; Exécutés</b> puis collez-les ici. Les montants et quantités seront importés automatiquement.</p><form className="page-stack" onSubmit={onImportIgPaste}><label>Classe d’actif par défaut<select name="fallbackAssetClass" defaultValue="ETF Maison"><option>Actions individuelles</option><option>ETF Monde</option><option>ETF Small Caps</option><option>ETF Maison</option><option>Non classé</option></select></label><label className="form-wide">Collage brut IG<textarea name="igPaste" rows={8} placeholder="Collez ici les lignes copiées depuis IG (avec colonnes Entreprise, Quantité, Type et prix, Exécuté)." required /></label><div className="inline-actions"><button className="button primary" type="submit">Importer dans le journal</button></div></form>{importMessage && <p className="import-warning">{importMessage}</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import trésorerie</span><strong>Coller l’historique cash IG</strong></div><span className="tag">Dépôts</span></div><p className="page-intro">Collez l’historique des transactions cash (Dépôt / Retrait). Seuls les dépôts sont importés pour corriger le cash sans dupliquer les achats.</p><form className="page-stack" onSubmit={onImportIgCashPaste}><label className="form-wide">Historique trésorerie<textarea name="igCashPaste" rows={8} placeholder="Collez ici l'historique avec montants et dates (ex: Dépôt 200,00 € 30/10/2026...)." required /></label><div className="inline-actions"><button className="button primary" type="submit">Importer les dépôts</button></div></form></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import cours</span><strong>Coller la table Vos avoirs</strong></div><span className="tag">Prix actuel</span></div><p className="page-intro">Copiez les lignes de <b>Vos avoirs</b> puis collez-les. Les cours seront appariés sur ticker ou nom d’instrument et mis à jour automatiquement.</p><form className="page-stack" onSubmit={onImportIgPricesPaste}><label className="form-wide">Collage brut IG<textarea name="igPricesPaste" rows={8} placeholder="Collez ici les lignes copiées depuis IG (Entreprise, Titres, Prix actuel...)." required /></label><div className="inline-actions"><button className="button primary" type="submit">Importer les cours</button></div></form></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Sauvegarde</span><strong>Exporter ou restaurer les données</strong></div><span className="tag">JSON local</span></div><p className="page-intro">Conservez une copie JSON avant de vider les données du navigateur ou de changer d’appareil.</p><div className="inline-actions">{data && <button className="button secondary" onClick={() => downloadPortfolioBackup(data)}>Télécharger la sauvegarde</button>}<label className="button secondary" htmlFor="restore-backup">Restaurer une sauvegarde</label><input id="restore-backup" className="file-input" type="file" accept="application/json,.json" onChange={onRestore} /></div>{message && <p className="import-warning">{message}</p>}</article></section>
+}
+
+function PdfStatementsDataView({ data, importMessage, isImporting, onImportPdf, onReset }: { data: PortfolioData | null; importMessage: string | null; isImporting: boolean; onImportPdf: (event: FormEvent<HTMLFormElement>) => Promise<void>; onReset: () => void }) {
+  return <section className="page-stack"><article className="card import-hero"><div className="insight-icon purple"><Database size={21} /></div><div><span className="card-label">Portefeuille local</span><strong>Import unique depuis relevés PDF IG</strong><p>Le portefeuille est reconstruit à partir des relevés PDF téléchargés depuis l’historique IG.</p></div><span className="tag">Flux unique</span></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">État local</span><strong>{data ? 'Données présentes' : 'Aucune donnée locale'}</strong></div><button className="button secondary danger-button" type="button" onClick={onReset}>Vider l’application</button></div>{data ? <div className="import-summary"><span><b>{data.transactions.length}</b> opérations locales</span><span><b>{Object.keys(data.marketPrices ?? {}).length}</b> cours saisis</span><span><b>{data.auditLog?.length ?? 0}</b> événements audités</span></div> : <p className="page-intro">Importez vos relevés PDF pour reconstruire l’historique complet.</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import relevés IG</span><strong>Analyser des PDF de transactions</strong></div><span className="tag">Multi-fichiers</span></div><p className="page-intro">Sélectionnez les relevés PDF téléchargés dans IG. L’application extrait automatiquement les transactions détectées et évite les doublons.</p><form className="page-stack" onSubmit={onImportPdf}><label>Classe d’actif de secours<select name="fallbackAssetClass" defaultValue="Non classé"><option>Non classé</option><option>Actions individuelles</option><option>ETF Monde</option><option>ETF Small Caps</option><option>ETF Maison</option></select></label><p className="page-intro">Utilisée uniquement si l’instrument n’est pas reconnu automatiquement.</p><label className="form-wide">Relevés PDF<input name="statementPdfs" type="file" accept=".pdf,application/pdf" multiple required /></label><div className="inline-actions"><button className="button primary" type="submit" disabled={isImporting}>{isImporting ? 'Analyse en cours…' : 'Importer les relevés PDF'}</button></div></form>{importMessage && <p className="import-warning">{importMessage}</p>}</article></section>
 }
 
 /* Anciennes vues d’import Excel et de rapprochement, retirées du produit local.
@@ -437,6 +745,7 @@ const allocationVisuals: Record<string, { name: string; color: string }> = {
   'ETF Small Caps': { name: 'ETF Small Caps', color: '#69d4b4' },
   'Actions individuelles': { name: 'Actions', color: '#e8af63' },
   'ETF Maison': { name: 'QDF', color: '#b48cff' },
+  'Non classé': { name: 'Non classé', color: '#8f9bb3' },
   Liquidités: { name: 'Liquidités', color: '#667085' },
 }
 
@@ -453,6 +762,7 @@ function toPositionDisplay(snapshot: PortfolioSnapshot) {
   return [...snapshot.positions]
     .sort((left, right) => right.marketValue - left.marketValue)
     .map((position) => ({
+      id: position.id,
       name: position.name,
       ticker: position.ticker ?? '—',
       isin: position.isin,
@@ -468,6 +778,10 @@ function formatPercent(value: number): string {
   return `${value >= 0 ? '' : '−'}${Math.abs(value * 100).toFixed(2).replace('.', ',')} %`
 }
 
+function formatQuantity(value: number): string {
+  return new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 0, maximumFractionDigits: 10 }).format(value)
+}
+
 function signedEuro(value: number): string {
   return `${value >= 0 ? '+' : '−'}${euro(Math.abs(value))}`
 }
@@ -477,10 +791,102 @@ function loadPortfolioData(): PortfolioData | null {
     const rawData = window.localStorage.getItem('ig-portefeuille-data')
     if (!rawData) return null
     const parsed = JSON.parse(rawData) as PortfolioData & { importedAt?: string }
-    return { ...parsed, createdAt: parsed.createdAt ?? parsed.importedAt ?? new Date().toISOString(), marketPrices: parsed.marketPrices ?? {} }
+    return normalizePortfolioData({ ...parsed, createdAt: parsed.createdAt ?? parsed.importedAt ?? new Date().toISOString(), marketPrices: parsed.marketPrices ?? {} })
   } catch {
     return null
   }
+}
+
+function normalizePortfolioData(data: PortfolioData): PortfolioData {
+  const migratedTransactions = data.transactions.map((transaction) => {
+    const note = transaction.note ?? ''
+    const imported = note.includes('Import IG par collage') || note.includes('Import relevé PDF IG')
+    const looksLikeEtf = /etf|small cap|ucits|vanguard|ishares|amundi|msci|ftse/i.test(transaction.instrumentName)
+    const isCoreIndividualStock = isCoreIndividualSecurity(transaction)
+
+    if (isCoreIndividualStock && transaction.assetClass !== 'Actions individuelles') {
+      return {
+        ...transaction,
+        assetClass: 'Actions individuelles' as AssetClass,
+      }
+    }
+
+    const canPromoteToQdf = transaction.assetClass === 'Actions individuelles' || transaction.assetClass === 'Non classé'
+    if (imported && canPromoteToQdf && !looksLikeEtf && !isCoreIndividualStock) {
+      return { ...transaction, assetClass: 'ETF Maison' as AssetClass, ticker: transaction.ticker ?? deriveTickerFromName(transaction.instrumentName) }
+    }
+    return transaction
+  })
+
+  let nextData: PortfolioData = { ...data, transactions: migratedTransactions }
+
+  if ((nextData.qdfConstituents?.length ?? 0) > 0) {
+    const remainingConstituents = nextData.qdfConstituents.filter((constituent) => !isCoreIndividualSecurity({ instrumentName: constituent.company, ticker: constituent.ticker, isin: constituent.isin }))
+    if (remainingConstituents.length !== nextData.qdfConstituents.length) {
+      const totalWeight = remainingConstituents.reduce((sum, constituent) => sum + (constituent.targetWeight > 0 ? constituent.targetWeight : 0), 0)
+      const normalizedConstituents = remainingConstituents.map((constituent, index) => ({
+        ...constituent,
+        rank: index + 1,
+        targetWeight: remainingConstituents.length === 0 ? 0 : totalWeight > 0 ? constituent.targetWeight / totalWeight : 1 / remainingConstituents.length,
+      }))
+      nextData = { ...nextData, qdfConstituents: normalizedConstituents }
+    }
+  }
+
+  if ((nextData.qdfConstituents?.length ?? 0) === 0) {
+    const qdfBuys = nextData.transactions.filter((transaction) => transaction.kind === 'Achat' && transaction.assetClass === 'ETF Maison' && !transaction.cancelledAt)
+    if (qdfBuys.length > 0) {
+      const unique = new Map<string, { company: string; ticker: string }>()
+      for (const buy of qdfBuys) {
+        const ticker = buy.ticker ?? deriveTickerFromName(buy.instrumentName)
+        const key = `${ticker}|${buy.instrumentName}`
+        if (!unique.has(key)) unique.set(key, { company: buy.instrumentName, ticker })
+      }
+      const targetWeight = unique.size > 0 ? 1 / unique.size : 0
+      nextData = {
+        ...nextData,
+        qdfConstituents: [...unique.values()].map((item, index) => ({
+          status: 'Actif',
+          rank: index + 1,
+          company: item.company,
+          ticker: item.ticker,
+          targetWeight,
+        })),
+      }
+    }
+  }
+
+  const hasAutoFunding = nextData.transactions.some((transaction) => transaction.instrumentName === 'Alimentation cash (auto import IG)')
+  const hasExplicitCashOps = nextData.transactions.some((transaction) => transaction.kind === 'Dépôt' || transaction.kind === 'Dividende' || transaction.kind === 'Frais')
+  const netCash = nextData.transactions.reduce((sum, transaction) => sum + (transaction.cashFlow ?? 0), 0)
+  if (hasAutoFunding || hasExplicitCashOps || netCash >= 0 || nextData.transactions.length === 0) return nextData
+  const firstDate = [...nextData.transactions].map((transaction) => transaction.occurredOn).sort()[0] ?? new Date().toISOString().slice(0, 10)
+  return {
+    ...nextData,
+    transactions: [...nextData.transactions, {
+      id: `manual-${crypto.randomUUID()}`,
+      occurredOn: firstDate,
+      kind: 'Dépôt',
+      instrumentName: 'Alimentation cash (auto import IG)',
+      grossAmount: Math.abs(netCash),
+      fees: 0,
+      cashFlow: Math.abs(netCash),
+      assetClass: 'Liquidités',
+      note: 'Ajustement automatique pour refléter un portefeuille valorisable sans historique des dépôts IG.',
+    }],
+  }
+}
+
+function deriveTickerFromName(name: string): string {
+  const compact = name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9 ]/g, ' ')
+    .trim()
+  const words = compact.split(/\s+/).filter(Boolean)
+  const first = words.slice(0, 3).map((word) => word[0]).join('').toUpperCase()
+  const fallback = compact.replace(/\s+/g, '').slice(0, 5).toUpperCase()
+  return first || fallback || 'QDF'
 }
 
 function createLocalPortfolio(): PortfolioData {
@@ -541,6 +947,299 @@ function calculateManualCashFlow(kind: TransactionKind, grossAmount: number, fee
 
 function formatDate(date: string): string {
   return new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(`${date}T12:00:00`))
+}
+
+function parseFrenchNumber(raw: string): number | undefined {
+  const compact = raw.replace(/\u00A0/g, ' ').replace(/\s+/g, '').replace(/[^\d,.-]/g, '')
+  if (!compact) return undefined
+  const trimmed = compact.replace(/[.,]+$/g, '')
+  if (!trimmed) return undefined
+  const normalized = trimmed.includes(',')
+    ? trimmed.replace(/\./g, '').replace(',', '.')
+    : trimmed
+  const value = Number(normalized)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function parseIsin(value: string): string | undefined {
+  const match = value.match(/\b[A-Z]{2}[A-Z0-9]{10}\b/)
+  return match?.[0]
+}
+
+function inferAssetClassFromName(name: string, fallback: AssetClass): AssetClass {
+  const normalized = name.toLowerCase()
+  if (isCoreIndividualSecurity({ instrumentName: name })) return 'Actions individuelles'
+  if (normalized.includes('small cap')) return 'ETF Small Caps'
+  if (normalized.includes('etf') || normalized.includes('ucits') || normalized.includes('amundi') || normalized.includes('vanguard') || normalized.includes('ishares') || normalized.includes('vang.') || normalized.includes('ishs')) return 'ETF Monde'
+  if (/\b(sa|inc|corp|group|holding|plc|ltd|nv|technology|technologies)\b/i.test(name)) return 'Actions individuelles'
+  return fallback
+}
+
+function isCoreIndividualSecurity(input: { instrumentName?: string; ticker?: string; isin?: string }): boolean {
+  const name = input.instrumentName ?? ''
+  const ticker = (input.ticker ?? '').toUpperCase()
+  const isin = (input.isin ?? '').toUpperCase()
+
+  if (isin === 'FR0000120073' || isin === 'US87357P1003') return true
+  if (ticker === 'TCMD' || ticker === 'TST' || ticker === 'AI' || ticker === 'ALI') return true
+  if (/air\s*liquide/i.test(name)) return true
+  if (/tactile\s*(systems?|sys)\s*(technology|tech)|tactile\s*sys\s*tech/i.test(name)) return true
+  return false
+}
+
+function toIsoDate(dayMonthYear: string): string | undefined {
+  const match = dayMonthYear.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+  if (!match) return undefined
+  return `${match[3]}-${match[2]}-${match[1]}`
+}
+
+function parseIgExecutedOrdersPaste(raw: string): Array<{ instrumentName: string; isin?: string; quantity: number; grossAmount: number; unitPrice?: number; occurredOn: string; kind: TransactionKind }> {
+  const normalized = raw
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\u00A0/g, ' ')
+    .replace(/(\d{2}\/\d{2}\/\d{4})(\d{2}:\d{2})/g, '$1 $2')
+    .replace(/(\d{2}\/\d{2}\/\d{4})\s*\n\s*(\d{2}:\d{2})/g, '$1 $2')
+  const parsed: Array<{ instrumentName: string; isin?: string; quantity: number; grossAmount: number; unitPrice?: number; occurredOn: string; kind: TransactionKind }> = []
+  const regex = /([^\n]+?)\s*\n\s*([\d.,]+)\s*€\s*\n\s*(Acheter|Vendre)\s*([\d.,]+)\s*\n\s*Ordre[^\n]*?à\s*([\d.,]+)\s*€\s*\n\s*(\d{2}\/\d{2}\/\d{4})(?:\s*\d{2}:\d{2})?/gi
+
+  for (const match of normalized.matchAll(regex)) {
+    const instrumentName = match[1]
+      .replace(/\s+/g, ' ')
+      .replace(/^[A-Z0-9.\-]{2,10}(?=[A-ZÀ-ÖØ-Þ])/u, '')
+      .trim()
+    const unitPrice = parseFrenchNumber(match[2])
+    const kind: TransactionKind = /vendre/i.test(match[3]) ? 'Vente' : 'Achat'
+    const quantity = parseFrenchNumber(match[4])
+    const grossAmount = parseFrenchNumber(match[5])
+    const occurredOn = toIsoDate(match[6])
+
+    if (!instrumentName || !quantity || !grossAmount || !occurredOn) continue
+    parsed.push({ instrumentName, quantity, grossAmount, unitPrice, occurredOn, kind })
+  }
+
+  if (parsed.length > 0) return parsed
+
+  const rows = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+
+  for (const row of rows) {
+    const lowered = row.toLowerCase()
+    if (lowered.includes('entreprise') || lowered.includes('prix actuel')) continue
+    if (!/(acheter|vendre)/i.test(row) || !/\d{2}\/\d{2}\/\d{4}/.test(row)) continue
+
+    const quantityMatch = row.match(/(acheter|vendre)\s*([\d.,]+)/i)
+    const quantity = quantityMatch ? parseFrenchNumber(quantityMatch[2]) : undefined
+    const kind: TransactionKind = quantityMatch && /vendre/i.test(quantityMatch[1]) ? 'Vente' : 'Achat'
+
+    const dateMatch = row.match(/(\d{2}\/\d{2}\/\d{4})/)
+    const occurredOn = dateMatch ? toIsoDate(dateMatch[1]) : undefined
+
+    const euroMatches = [...row.matchAll(/([\d.,]+)\s*€/g)]
+    const lastEuro = euroMatches.at(-1)?.[1]
+    const grossAmount = lastEuro ? parseFrenchNumber(lastEuro) : undefined
+    const unitPrice = euroMatches.length >= 2 ? parseFrenchNumber(euroMatches[0][1]) : undefined
+
+    const instrumentPrefix = row.split(/(acheter|vendre)/i)[0]?.trim() ?? ''
+    let instrumentName = instrumentPrefix
+      .replace(/\t/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[A-Z0-9.\-]{1,10}\s+/, '')
+      .replace(/([\d.,]+)\s*€\s*$/, '')
+      .trim()
+
+    if (!instrumentName && row.includes('\t')) {
+      const cells = row.split('\t').map((item) => item.trim()).filter(Boolean)
+      instrumentName = cells.find((cell) => /[A-Za-z]/.test(cell) && !/€/.test(cell) && !/(acheter|vendre)/i.test(cell) && !/\d{2}\/\d{2}\/\d{4}/.test(cell)) ?? ''
+    }
+
+    if (!instrumentName || !quantity || !grossAmount || !occurredOn) continue
+    parsed.push({ instrumentName, quantity, grossAmount, unitPrice, occurredOn, kind })
+  }
+
+  return parsed
+}
+
+function normalizeLabel(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function parseIgHoldingsPaste(raw: string): Array<{ ticker?: string; instrumentName: string; quantity: number; marketPrice: number }> {
+  const normalized = raw
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\u00A0/g, ' ')
+  const rows = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const parsed: Array<{ ticker?: string; instrumentName: string; quantity: number; marketPrice: number }> = []
+
+  const blockRegex = /([^\n]+?)\s*\n\s*[\d.,]+\s*€\s*\n\s*[+\-]?[\d.,]+\s*€[^\n]*\n\s*([\d.,]+)\.\.\.\s*\n\s*([\d.,]+)\s*€\s*\n\s*[\d.,]+\s*€\s*\n\s*[\d.,]+\s*€/gi
+  for (const match of normalized.matchAll(blockRegex)) {
+    const merged = match[1].replace(/\s+/g, ' ').trim()
+    const split = merged.match(/^([A-Z0-9.\-]{2,10})([A-ZÀ-ÖØ-Þ].*)$/u)
+    const ticker = split ? split[1] : undefined
+    const instrumentName = (split ? split[2] : merged).trim()
+    const quantity = parseFrenchNumber(match[2])
+    const marketPrice = parseFrenchNumber(match[3])
+    if (!instrumentName || !quantity || !marketPrice || marketPrice <= 0) continue
+    parsed.push({ ticker, instrumentName, quantity, marketPrice })
+  }
+
+  if (parsed.length > 0) return parsed
+
+  for (const row of rows) {
+    const columns = row.split('\t').map((item) => item.trim())
+    if (columns.length < 5) continue
+    const first = columns[0].toLowerCase()
+    if (first === 'entreprise' || first.includes('vos avoirs')) continue
+
+    const firstCell = columns[0]
+    const firstCellParts = firstCell.split(/\s{2,}|\n/).map((item) => item.trim()).filter(Boolean)
+    const tickerCandidate = firstCellParts[0]
+    const ticker = /^[A-Z0-9.\-]{1,12}$/.test(tickerCandidate) ? tickerCandidate : undefined
+    const instrumentName = (ticker && firstCellParts.length > 1 ? firstCellParts.slice(1).join(' ') : firstCell).trim()
+    const quantity = parseFrenchNumber(columns[3])
+    const marketPrice = parseFrenchNumber(columns[4])
+
+    if (!instrumentName || !quantity || !marketPrice || marketPrice <= 0) continue
+    parsed.push({ ticker, instrumentName, quantity, marketPrice })
+  }
+
+  return parsed
+}
+
+function parseIgCashHistoryPaste(raw: string): Array<{ kind: 'Dépôt' | 'Retrait'; amount: number; occurredOn: string }> {
+  const normalized = raw
+    .replace(/\u00A0/g, ' ')
+    .replace(/(\d{2}\/\d{2}\/\d{4})(\d{2}:\d{2})/g, '$1 $2')
+  const rows: Array<{ kind: 'Dépôt' | 'Retrait'; amount: number; occurredOn: string }> = []
+
+  const regex = /(Dépôt|Acheter)\s*\n\s*([+\-]?[\d.,]+)\s*€\s*\n\s*(\d{2}\/\d{2}\/\d{4})/gi
+  for (const match of normalized.matchAll(regex)) {
+    const verb = match[1]
+    const amount = parseFrenchNumber(match[2])
+    const occurredOn = toIsoDate(match[3])
+    if (amount === undefined || !occurredOn) continue
+    const isDeposit = /dépôt/i.test(verb) && amount > 0
+    rows.push({ kind: isDeposit ? 'Dépôt' : 'Retrait', amount: Math.abs(amount), occurredOn })
+  }
+
+  return rows
+}
+
+function parseIgOrderStatementPdfText(raw: string, kind: 'Achat' | 'Vente'): Array<{ instrumentName: string; isin?: string; quantity: number; grossAmount: number; unitPrice?: number; occurredOn: string; kind: TransactionKind }> {
+  const normalized = raw.replace(/\u00A0/g, ' ')
+  const lines = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+
+  let instrumentName: string | undefined
+  const titleIndex = lines.findIndex((line) => /^Titre$/i.test(line))
+  if (titleIndex >= 0) {
+    for (let i = titleIndex + 1; i < lines.length; i += 1) {
+      const candidate = lines[i]
+      if (/^ISIN$/i.test(candidate)) break
+      if (!candidate || /^Titre$/i.test(candidate)) continue
+      instrumentName = candidate
+      break
+    }
+  }
+
+  if (!instrumentName) {
+    const fallbackTitleMatch = normalized.match(/\bTitre\b\s+([^\n]+)/i)
+    instrumentName = fallbackTitleMatch?.[1]?.trim()
+  }
+
+  const isinMatch = normalized.match(/\bISIN\b\s+([A-Z]{2}[A-Z0-9]{10})\b/i)
+  const quantityMatch = normalized.match(/Valeur\s+nominale\s*\/\s*Quantité\s+([\d.,]+)\s+unit/i)
+  const priceMatch = normalized.match(/\bPrix\b\s+([\d.,]+)\s+EUR\b/i)
+  const debitMatch = normalized.match(/Montant\s+débité\s+([\d.,]+)\s+EUR\b/i)
+  const creditMatch = normalized.match(/Montant\s+crédité\s+([\d.,]+)\s+EUR\b/i)
+  const valueDateMatch = normalized.match(/Date\s+de\s+valeur\s+(\d{2}\.\d{2}\.\d{4})\b/i)
+  const operationDateMatch = normalized.match(/Heure\s+d['’]Opération:\s*(\d{2}\.\d{2}\.\d{4})\b/i)
+
+  const quantity = quantityMatch ? parseFrenchNumber(quantityMatch[1]) : undefined
+  const unitPrice = priceMatch ? parseFrenchNumber(priceMatch[1]) : undefined
+  const grossAmount = debitMatch
+    ? parseFrenchNumber(debitMatch[1])
+    : creditMatch
+      ? parseFrenchNumber(creditMatch[1])
+      : quantity && unitPrice
+        ? quantity * unitPrice
+        : undefined
+
+  const occurredOn = toIsoDate((valueDateMatch?.[1] ?? operationDateMatch?.[1] ?? '').replace(/\./g, '/'))
+  const isin = isinMatch?.[1]
+  instrumentName = instrumentName?.trim()
+
+  if (!instrumentName || !quantity || !grossAmount || !occurredOn) return []
+
+  return [{
+    instrumentName,
+    isin,
+    quantity,
+    grossAmount,
+    unitPrice,
+    occurredOn,
+    kind,
+  }]
+}
+
+function findPositionForHoldingRow(activePositions: Array<{ id: string; ticker?: string; name: string }>, row: { ticker?: string; instrumentName: string; quantity: number; marketPrice: number }) {
+  if (row.ticker) {
+    const byTicker = activePositions.find((position) => (position.ticker ?? '').toUpperCase() === row.ticker?.toUpperCase())
+    if (byTicker) return byTicker
+  }
+
+  const rowName = normalizeLabel(row.instrumentName)
+  let bestMatch: { id: string; ticker?: string; name: string } | undefined
+  let bestScore = 0
+
+  for (const position of activePositions) {
+    const candidate = normalizeLabel(position.name)
+    if (!candidate || !rowName) continue
+    if (candidate === rowName) return position
+    if (candidate.includes(rowName) || rowName.includes(candidate)) {
+      const score = Math.min(candidate.length, rowName.length)
+      if (score > bestScore) {
+        bestScore = score
+        bestMatch = position
+      }
+    }
+  }
+
+  return bestMatch
+}
+
+async function extractTextFromPdfFile(file: File): Promise<string> {
+  if (!GlobalWorkerOptions.workerSrc) {
+    GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString()
+  }
+
+  const buffer = await file.arrayBuffer()
+  const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise
+  const pages: string[] = []
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber)
+    const textContent = await page.getTextContent()
+    const text = textContent.items
+      .map((item) => ('str' in item ? item.str : ''))
+      .join('\n')
+    pages.push(text)
+  }
+
+  return pages.join('\n')
+}
+
+function detectIgPdfType(fileName: string): 'QUARTERLY' | 'ACCOUNT_OPENING' | 'ORDER_EX_ANTE_COST' | 'CANCELLED_ORDER' | 'BUY_ORDER' | 'SELL_ORDER' | 'UNKNOWN' {
+  const normalized = fileName.toUpperCase()
+  if (normalized.includes('REPORT_TYPE_QUARTERLY_ACCOUNT_STATEMENT')) return 'QUARTERLY'
+  if (normalized.includes('REPORT_TYPE_ACCOUNT_OPENING')) return 'ACCOUNT_OPENING'
+  if (normalized.includes('REPORT_TYPE_BUY_ORDER')) return 'BUY_ORDER'
+  if (normalized.includes('REPORT_TYPE_SELL_ORDER')) return 'SELL_ORDER'
+  if (normalized.includes('REPORT_TYPE_ORDER_EX_ANTE_COST')) return 'ORDER_EX_ANTE_COST'
+  if (normalized.includes('REPORT_TYPE_CANCELLED_ORDER')) return 'CANCELLED_ORDER'
+  return 'UNKNOWN'
 }
 
 export default App
