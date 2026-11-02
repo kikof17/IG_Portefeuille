@@ -374,11 +374,19 @@ function App() {
 
         try {
           const text = await extractTextFromPdfFile(file)
+          const textKind = detectIgStatementKindFromText(text)
+          const ordersFromExecutedPaste = parseIgExecutedOrdersPaste(text)
+          const ordersFromBuyStatement = parseIgOrderStatementPdfText(text, 'Achat')
+          const ordersFromSellStatement = parseIgOrderStatementPdfText(text, 'Vente')
+          const ordersFromStatements = [...ordersFromBuyStatement, ...ordersFromSellStatement]
+
+          if (textKind === 'EX_ANTE' || textKind === 'CANCELLED') {
+            ignoredFiles += 1
+            continue
+          }
 
           if (fileType === 'ORDER_EX_ANTE_COST' || fileType === 'CANCELLED_ORDER') {
-            const fromBuyStatement = parseIgOrderStatementPdfText(text, 'Achat')
-            const fromSellStatement = parseIgOrderStatementPdfText(text, 'Vente')
-            const fallbackOrders = [...fromBuyStatement, ...fromSellStatement]
+            const fallbackOrders = [...ordersFromStatements, ...ordersFromExecutedPaste]
 
             if (fallbackOrders.length === 0) {
               ignoredFiles += 1
@@ -391,16 +399,23 @@ function App() {
 
           if (fileType === 'BUY_ORDER' || fileType === 'SELL_ORDER') {
             const fromStatement = parseIgOrderStatementPdfText(text, fileType === 'SELL_ORDER' ? 'Vente' : 'Achat')
-            parsedOrders.push(...fromStatement)
+            if (fromStatement.length > 0) {
+              parsedOrders.push(...fromStatement)
+              continue
+            }
+
+            const fallbackOrders = [...ordersFromStatements, ...ordersFromExecutedPaste]
+            parsedOrders.push(...fallbackOrders)
             continue
           }
 
           if (fileType === 'ACCOUNT_OPENING') {
             parsedCashRows.push(...parseIgCashHistoryPaste(text))
+            parsedOrders.push(...ordersFromStatements, ...ordersFromExecutedPaste)
             continue
           }
 
-          parsedOrders.push(...parseIgExecutedOrdersPaste(text))
+          parsedOrders.push(...ordersFromExecutedPaste, ...ordersFromStatements)
           parsedCashRows.push(...parseIgCashHistoryPaste(text))
         } catch {
           unreadableFiles += 1
@@ -1381,16 +1396,40 @@ function parseIgOrderStatementPdfText(raw: string, kind: 'Achat' | 'Vente'): Arr
     instrumentName = fallbackTitleMatch?.[1]?.trim()
   }
 
+  if (!instrumentName) {
+    const titleRowIndex = lines.findIndex((line) => /\bTitre\b/i.test(line) && /\bISIN\b/i.test(line))
+    if (titleRowIndex >= 0) {
+      for (let i = titleRowIndex + 1; i < lines.length; i += 1) {
+        const candidate = lines[i]
+        if (!candidate) continue
+        if (/\b[A-Z]{2}[A-Z0-9]{10}\b/.test(candidate)) continue
+        if (/^Valeur\s+nominale/i.test(candidate) || /^Transaction$/i.test(candidate)) break
+        instrumentName = candidate
+        break
+      }
+    }
+  }
+
   const isinMatch = normalized.match(/\bISIN\b\s+([A-Z]{2}[A-Z0-9]{10})\b/i)
   const quantityMatch = normalized.match(/Valeur\s+nominale\s*\/\s*Quantité\s+([\d.,]+)\s+unit/i)
+  const quantityFallbackMatch = normalized.match(/([\d.,]+)\s+unit(?:é|e)?\(s\)/i)
   const priceMatch = normalized.match(/\bPrix\b\s+([\d.,]+)\s+EUR\b/i)
+  const marketLineMatch = normalized.match(/([\d.,]+)\s+unit(?:é|e)?\(s\)[^\n]*?([\d.,]+)\s+EUR/i)
   const debitMatch = normalized.match(/Montant\s+débité\s+([\d.,]+)\s+EUR\b/i)
   const creditMatch = normalized.match(/Montant\s+crédité\s+([\d.,]+)\s+EUR\b/i)
   const valueDateMatch = normalized.match(/Date\s+de\s+valeur\s+(\d{2}\.\d{2}\.\d{4})\b/i)
   const operationDateMatch = normalized.match(/Heure\s+d['’]Opération:\s*(\d{2}\.\d{2}\.\d{4})\b/i)
 
-  const quantity = quantityMatch ? parseFrenchNumber(quantityMatch[1]) : undefined
-  const unitPrice = priceMatch ? parseFrenchNumber(priceMatch[1]) : undefined
+  const quantity = quantityMatch
+    ? parseFrenchNumber(quantityMatch[1])
+    : quantityFallbackMatch
+      ? parseFrenchNumber(quantityFallbackMatch[1])
+      : undefined
+  const unitPrice = priceMatch
+    ? parseFrenchNumber(priceMatch[1])
+    : marketLineMatch
+      ? parseFrenchNumber(marketLineMatch[2])
+      : undefined
   const grossAmount = debitMatch
     ? parseFrenchNumber(debitMatch[1])
     : creditMatch
@@ -1414,6 +1453,19 @@ function parseIgOrderStatementPdfText(raw: string, kind: 'Achat' | 'Vente'): Arr
     occurredOn,
     kind,
   }]
+}
+
+function detectIgStatementKindFromText(raw: string): 'BUY' | 'SELL' | 'EX_ANTE' | 'CANCELLED' | 'OTHER' {
+  const normalized = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+
+  if (normalized.includes('informations sur les couts ex ante')) return 'EX_ANTE'
+  if (normalized.includes('annulation d\'un ordre') || normalized.includes('ordre annule')) return 'CANCELLED'
+  if (normalized.includes('reglement de titres') && normalized.includes('achat')) return 'BUY'
+  if ((normalized.includes('reglement de titres') || normalized.includes('reglement-livraison de titres')) && normalized.includes('vente')) return 'SELL'
+  return 'OTHER'
 }
 
 function findPositionForHoldingRow(activePositions: Array<{ id: string; ticker?: string; name: string }>, row: { ticker?: string; instrumentName: string; quantity: number; marketPrice: number }) {
