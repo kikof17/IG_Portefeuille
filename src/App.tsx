@@ -801,6 +801,27 @@ function signedEuro(value: number): string {
   return `${value >= 0 ? '+' : '−'}${euro(Math.abs(value))}`
 }
 
+const STORAGE_KEY = 'ig-portefeuille-data'
+const STORAGE_FORMAT = 'ig-portefeuille-data'
+const CURRENT_DATA_SCHEMA_VERSION = 2
+
+interface PersistedPortfolioEnvelope {
+  format: typeof STORAGE_FORMAT
+  schemaVersion: typeof CURRENT_DATA_SCHEMA_VERSION
+  savedAt: string
+  data: PortfolioData
+}
+
+export interface PortfolioBackupAdapter {
+  pushSnapshot: (payload: PersistedPortfolioEnvelope) => Promise<void>
+}
+
+let configuredBackupAdapter: PortfolioBackupAdapter | null = null
+
+export function configurePortfolioBackupAdapter(adapter: PortfolioBackupAdapter | null): void {
+  configuredBackupAdapter = adapter
+}
+
 function isDesktopRuntime(): boolean {
   return Boolean(window.desktopAPI?.isDesktop)
 }
@@ -814,14 +835,68 @@ function getPortfolioStorageDirectory(): string | null {
   }
 }
 
+function readStoragePayload(): string | null {
+  if (isDesktopRuntime()) {
+    return window.desktopAPI?.readPortfolioDataSync() ?? null
+  }
+  return window.localStorage.getItem(STORAGE_KEY)
+}
+
+function writeStoragePayload(content: string): void {
+  if (isDesktopRuntime()) {
+    window.desktopAPI?.writePortfolioDataSync(content)
+    return
+  }
+  window.localStorage.setItem(STORAGE_KEY, content)
+}
+
+function isPersistedPortfolioEnvelope(value: unknown): value is PersistedPortfolioEnvelope {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<PersistedPortfolioEnvelope>
+  return candidate.format === STORAGE_FORMAT && candidate.schemaVersion === CURRENT_DATA_SCHEMA_VERSION && Boolean(candidate.data)
+}
+
+function migratePortfolioSchema(data: PortfolioData): PortfolioData {
+  if (data.schemaVersion === CURRENT_DATA_SCHEMA_VERSION) return data
+  if (data.schemaVersion === 1) {
+    return { ...data, schemaVersion: CURRENT_DATA_SCHEMA_VERSION }
+  }
+  return { ...data, schemaVersion: CURRENT_DATA_SCHEMA_VERSION }
+}
+
+function extractPortfolioDataFromStoredValue(parsed: unknown): PortfolioData | null {
+  if (isPersistedPortfolioEnvelope(parsed)) {
+    return migratePortfolioSchema(parsed.data)
+  }
+  if (isPortfolioData(parsed)) {
+    return migratePortfolioSchema(parsed)
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const candidate = parsed as { data?: unknown }
+  if (candidate.data && isPortfolioData(candidate.data)) {
+    return migratePortfolioSchema(candidate.data)
+  }
+  return null
+}
+
+function buildPersistedEnvelope(data: PortfolioData): PersistedPortfolioEnvelope {
+  return {
+    format: STORAGE_FORMAT,
+    schemaVersion: CURRENT_DATA_SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    data,
+  }
+}
+
 function loadPortfolioData(): PortfolioData | null {
   try {
-    const rawData = isDesktopRuntime()
-      ? window.desktopAPI?.readPortfolioDataSync() ?? null
-      : window.localStorage.getItem('ig-portefeuille-data')
+    const rawData = readStoragePayload()
     if (!rawData) return null
-    const parsed = JSON.parse(rawData) as PortfolioData & { importedAt?: string }
-    return normalizePortfolioData({ ...parsed, createdAt: parsed.createdAt ?? parsed.importedAt ?? new Date().toISOString(), marketPrices: parsed.marketPrices ?? {} })
+    const parsed = JSON.parse(rawData) as unknown
+    const extracted = extractPortfolioDataFromStoredValue(parsed)
+    if (!extracted) return null
+    const parsedPortfolio = extracted as PortfolioData & { importedAt?: string }
+    return normalizePortfolioData({ ...parsedPortfolio, createdAt: parsedPortfolio.createdAt ?? parsedPortfolio.importedAt ?? new Date().toISOString(), marketPrices: parsedPortfolio.marketPrices ?? {} })
   } catch {
     return null
   }
@@ -921,7 +996,7 @@ function deriveTickerFromName(name: string): string {
 
 function createLocalPortfolio(): PortfolioData {
   return {
-    schemaVersion: 1,
+    schemaVersion: CURRENT_DATA_SCHEMA_VERSION,
     createdAt: new Date().toISOString(),
     transactions: [],
     marketPrices: {},
@@ -937,12 +1012,15 @@ function createLocalPortfolio(): PortfolioData {
 }
 
 function savePortfolioData(data: PortfolioData): void {
-  const serialized = JSON.stringify(data)
-  if (isDesktopRuntime()) {
-    window.desktopAPI?.writePortfolioDataSync(serialized)
-    return
+  const migratedData = migratePortfolioSchema(data)
+  const envelope = buildPersistedEnvelope(migratedData)
+  writeStoragePayload(JSON.stringify(envelope))
+
+  if (configuredBackupAdapter) {
+    void configuredBackupAdapter.pushSnapshot(envelope).catch((error) => {
+      console.error('Echec de sauvegarde backend (adapter):', error)
+    })
   }
-  window.localStorage.setItem('ig-portefeuille-data', serialized)
 }
 
 function downloadPortfolioBackup(data: PortfolioData): void {
@@ -959,7 +1037,8 @@ function downloadPortfolioBackup(data: PortfolioData): void {
 function isPortfolioData(value: unknown): value is PortfolioData {
   if (!value || typeof value !== 'object') return false
   const data = value as Partial<PortfolioData>
-  return data.schemaVersion === 1 && Array.isArray(data.transactions) && Array.isArray(data.allocationTargets) && Array.isArray(data.qdfConstituents) && Boolean(data.rebalancingRules)
+  const hasKnownSchema = data.schemaVersion === 1 || data.schemaVersion === CURRENT_DATA_SCHEMA_VERSION
+  return hasKnownSchema && Array.isArray(data.transactions) && Array.isArray(data.allocationTargets) && Array.isArray(data.qdfConstituents) && Boolean(data.rebalancingRules)
 }
 
 function positiveNumber(value: FormDataEntryValue | null): number | undefined {

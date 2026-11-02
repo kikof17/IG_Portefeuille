@@ -64,7 +64,7 @@ export interface PortfolioHistoryPoint {
 }
 
 export interface PortfolioData {
-  schemaVersion: 1
+  schemaVersion: number
   createdAt: string
   transactions: Transaction[]
   marketPrices?: Record<string, MarketPrice>

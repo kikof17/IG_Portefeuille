@@ -55,6 +55,31 @@ configurable depuis l'écran Données locales (bouton Changer le dossier de donn
 - Par défaut : `%APPDATA%/ig-portefeuille/data/portfolio-data.json`
 - Configurable ensuite vers n'importe quel dossier de votre choix
 
+## Versioning des données
+
+Le stockage local est versionné via une enveloppe persistée :
+
+```json
+{
+	"format": "ig-portefeuille-data",
+	"schemaVersion": 2,
+	"savedAt": "2026-11-02T07:00:00.000Z",
+	"data": { "...": "PortfolioData" }
+}
+```
+
+La migration v1 -> v2 est automatique au chargement. Les anciennes données
+restent compatibles sans action manuelle.
+
+## Préparation backend sauvegarde
+
+Le code expose un point d’extension pour brancher un backend de sauvegarde
+sans casser l’exécutable desktop.
+
+- Adapter: `configurePortfolioBackupAdapter(...)` dans [src/App.tsx](src/App.tsx)
+- Contrat: méthode `pushSnapshot(payload)` appelée après chaque sauvegarde locale
+- Comportement actuel: aucun backend actif par défaut (mode local pur)
+
 ## Source de données
 
 Le compte-titres IG n'est pas pris en charge par l’API publique IG. L’application
