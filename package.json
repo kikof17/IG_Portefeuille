@@ -1,7 +1,7 @@
 {
   "name": "ig-portefeuille",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -10,12 +10,14 @@
     "electron:dev": "wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
     "build": "tsc -b && vite build",
     "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:win:publish": "npm run build && electron-builder --win nsis --publish always",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "electron-updater": "^6.7.2",
     "lucide-react": "^1.52.0",
     "pdfjs-dist": "^6.4.299",
     "react": "^19.3.0",
@@ -63,6 +65,12 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/kikof17/IG_Portefeuille/releases/latest/download/"
+      }
+    ]
   }
 }

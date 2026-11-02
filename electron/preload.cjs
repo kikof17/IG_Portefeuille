@@ -21,12 +21,24 @@ function writeConfig(config) {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8')
 }
 
+function getDefaultDataDirectorySync() {
+  return path.join(userDataPath, 'data')
+}
+
 function getDataDirectorySync() {
   const config = readConfig()
   if (typeof config.dataDirectory === 'string' && config.dataDirectory.trim()) {
-    return config.dataDirectory
+    const configuredDirectory = config.dataDirectory.trim()
+    try {
+      fs.mkdirSync(configuredDirectory, { recursive: true })
+      return configuredDirectory
+    } catch {
+      const fallbackDirectory = getDefaultDataDirectorySync()
+      writeConfig({ ...config, dataDirectory: fallbackDirectory })
+      return fallbackDirectory
+    }
   }
-  return path.join(userDataPath, 'data')
+  return getDefaultDataDirectorySync()
 }
 
 function getDataFilePathSync() {
@@ -58,6 +70,22 @@ async function chooseDataDirectory() {
   return selected
 }
 
+function getUpdateState() {
+  return ipcRenderer.invoke('desktop:update-get-state')
+}
+
+function checkForUpdates() {
+  return ipcRenderer.invoke('desktop:update-check')
+}
+
+function downloadUpdate() {
+  return ipcRenderer.invoke('desktop:update-download')
+}
+
+function installDownloadedUpdate() {
+  return ipcRenderer.invoke('desktop:update-install')
+}
+
 contextBridge.exposeInMainWorld('desktopAPI', {
   isDesktop: true,
   getDataDirectorySync,
@@ -65,4 +93,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   writePortfolioDataSync,
   clearPortfolioDataSync,
   chooseDataDirectory,
+  getUpdateState,
+  checkForUpdates,
+  downloadUpdate,
+  installDownloadedUpdate,
 })

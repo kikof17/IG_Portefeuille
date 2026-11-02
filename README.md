@@ -47,6 +47,41 @@ npm run dist:win
 
 Les artefacts d'installation sont produits dans le dossier [release](release).
 
+### Mise a jour automatique (desktop)
+
+L'application desktop inclut un flux de mise a jour base sur `latest.yml` de GitHub Releases (URL de telechargement direct).
+
+- dans l'app: Donnees locales -> Mises a jour automatiques
+- actions disponibles: verifier, telecharger, installer et redemarrer
+
+Pour publier une nouvelle version detectable par l'application:
+
+1. incrementer la version dans [package.json](package.json)
+2. creer les artefacts localement:
+
+```text
+npm run dist:win
+```
+
+3. publier les artefacts du dossier [release](release) dans une Release GitHub avec un tag de version (ex: v0.1.5):
+
+- `Portefeuille IG Setup X.Y.Z.exe`
+- `Portefeuille IG Setup X.Y.Z.exe.blockmap`
+- `latest.yml`
+
+Important:
+
+- la release doit etre accessible sans authentification depuis la machine cliente
+- si le depot/release est prive, la verification auto-update peut echouer avec 401/403/404
+
+Alternative CI/local automatisee (necessite un token GitHub):
+
+```text
+npm run dist:win:publish
+```
+
+Cette commande utilise electron-builder et publie automatiquement la release.
+
 ### Dossier des données
 
 En mode desktop, les données sont stockées dans un fichier JSON, dans un dossier
