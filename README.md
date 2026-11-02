@@ -30,6 +30,31 @@ npm install
 npm run dev
 ```
 
+## Utilisation en application Windows
+
+L'application peut aussi tourner en mode desktop (Electron) avec un stockage
+fichier local, au lieu du stockage navigateur.
+
+```text
+npm run dev:desktop
+```
+
+Pour générer un installateur Windows (.exe NSIS) :
+
+```text
+npm run dist:win
+```
+
+Les artefacts d'installation sont produits dans le dossier [release](release).
+
+### Dossier des données
+
+En mode desktop, les données sont stockées dans un fichier JSON, dans un dossier
+configurable depuis l'écran Données locales (bouton Changer le dossier de données).
+
+- Par défaut : `%APPDATA%/ig-portefeuille/data/portfolio-data.json`
+- Configurable ensuite vers n'importe quel dossier de votre choix
+
 ## Source de données
 
 Le compte-titres IG n'est pas pris en charge par l’API publique IG. L’application

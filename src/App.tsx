@@ -66,6 +66,7 @@ function App() {
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null)
   const [importMessage, setImportMessage] = useState<string | null>(null)
   const [isPdfImporting, setIsPdfImporting] = useState(false)
+  const [storageDirectory, setStorageDirectory] = useState<string | null>(() => getPortfolioStorageDirectory())
   const snapshot = portfolioData ? calculatePortfolio(portfolioData) : null
   const portfolioIssues = portfolioData ? validatePortfolio(portfolioData) : []
   const overviewAllocation = snapshot ? toAllocationDisplay(snapshot) : []
@@ -468,12 +469,26 @@ function App() {
   }
 
   const resetLocalPortfolio = () => {
-    window.localStorage.removeItem('ig-portefeuille-data')
+    if (isDesktopRuntime()) {
+      window.desktopAPI?.clearPortfolioDataSync()
+    } else {
+      window.localStorage.removeItem('ig-portefeuille-data')
+    }
     setPortfolioData(null)
     setImportMessage('Données locales supprimées. Portefeuille réinitialisé.')
     setBackupMessage(null)
     setSettingsMessage(null)
+    setStorageDirectory(getPortfolioStorageDirectory())
     setActive('Données locales')
+  }
+
+  const chooseStorageDirectory = async () => {
+    if (!isDesktopRuntime()) return
+    const selected = await window.desktopAPI?.chooseDataDirectory()
+    if (!selected) return
+    setStorageDirectory(selected)
+    if (portfolioData) savePortfolioData(portfolioData)
+    setImportMessage(`Dossier de données configuré: ${selected}`)
   }
   const disableQdfConstituent = (ticker: string) => {
     if (!portfolioData) return
@@ -612,7 +627,7 @@ function App() {
         {active === 'Rééquilibrage' && <RebalancingView snapshot={snapshot} onPrepare={prepareSuggestedPurchase} />}
         {active === 'Historique' && <HistoryView data={portfolioData} />}
         {active === 'Contrôles' && <LocalControlsView issues={portfolioIssues} hasData={Boolean(portfolioData)} />}
-        {active === 'Données locales' && <PdfStatementsDataView data={portfolioData} importMessage={importMessage} isImporting={isPdfImporting} onImportPdf={importIgStatementsFromPdf} onReset={resetLocalPortfolio} />}
+        {active === 'Données locales' && <PdfStatementsDataView data={portfolioData} importMessage={importMessage} isImporting={isPdfImporting} storageDirectory={storageDirectory} isDesktop={isDesktopRuntime()} onImportPdf={importIgStatementsFromPdf} onReset={resetLocalPortfolio} onChooseStorageDirectory={chooseStorageDirectory} />}
         {active === 'Paramètres' && <SettingsView data={portfolioData} onSave={saveSettings} message={settingsMessage} />}
       </section>
       {isTransactionDialogOpen && (editingTransaction ? <EditTransactionDialog transaction={editingTransaction} onClose={() => { setIsTransactionDialogOpen(false); setEditingTransaction(null) }} onSubmit={addManualTransaction} /> : <ManualTransactionDialog suggestedPurchase={suggestedPurchase} onClose={() => { setIsTransactionDialogOpen(false); setEditingTransaction(null); setSuggestedPurchase(null) }} onSubmit={addManualTransaction} />)}
@@ -716,8 +731,8 @@ function LocalDataView({ data, onInitialize, onRestore, message, importMessage, 
   return <section className="page-stack"><article className="card import-hero"><div className="insight-icon purple"><Database size={21} /></div><div><span className="card-label">Portefeuille local</span><strong>Vos données restent dans ce navigateur</strong><p>Ajoutez directement les opérations dans le journal et actualisez les cours dans l’écran dédié.</p></div><span className="tag">Sans import API IG</span></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Démarrage</span><strong>{data ? 'Portefeuille initialisé' : 'Initialiser le portefeuille'}</strong></div>{!data && <button className="button primary" onClick={onInitialize}>Créer un portefeuille vide</button>}</div>{data ? <div className="import-summary"><span><b>{data.transactions.length}</b> opérations locales</span><span><b>{Object.keys(data.marketPrices ?? {}).length}</b> cours saisis</span><span><b>{data.auditLog?.length ?? 0}</b> événements audités</span></div> : <p className="page-intro">Commencez par créer un portefeuille vide, puis enregistrez un dépôt et vos achats dans le journal.</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import transactions</span><strong>Coller les ordres exécutés IG</strong></div><span className="tag">Copier / coller</span></div><p className="page-intro">Depuis IG, copiez les lignes du tableau <b>Ordres &gt; Exécutés</b> puis collez-les ici. Les montants et quantités seront importés automatiquement.</p><form className="page-stack" onSubmit={onImportIgPaste}><label>Classe d’actif par défaut<select name="fallbackAssetClass" defaultValue="ETF Maison"><option>Actions individuelles</option><option>ETF Monde</option><option>ETF Small Caps</option><option>ETF Maison</option><option>Non classé</option></select></label><label className="form-wide">Collage brut IG<textarea name="igPaste" rows={8} placeholder="Collez ici les lignes copiées depuis IG (avec colonnes Entreprise, Quantité, Type et prix, Exécuté)." required /></label><div className="inline-actions"><button className="button primary" type="submit">Importer dans le journal</button></div></form>{importMessage && <p className="import-warning">{importMessage}</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import trésorerie</span><strong>Coller l’historique cash IG</strong></div><span className="tag">Dépôts</span></div><p className="page-intro">Collez l’historique des transactions cash (Dépôt / Retrait). Seuls les dépôts sont importés pour corriger le cash sans dupliquer les achats.</p><form className="page-stack" onSubmit={onImportIgCashPaste}><label className="form-wide">Historique trésorerie<textarea name="igCashPaste" rows={8} placeholder="Collez ici l'historique avec montants et dates (ex: Dépôt 200,00 € 30/10/2026...)." required /></label><div className="inline-actions"><button className="button primary" type="submit">Importer les dépôts</button></div></form></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import cours</span><strong>Coller la table Vos avoirs</strong></div><span className="tag">Prix actuel</span></div><p className="page-intro">Copiez les lignes de <b>Vos avoirs</b> puis collez-les. Les cours seront appariés sur ticker ou nom d’instrument et mis à jour automatiquement.</p><form className="page-stack" onSubmit={onImportIgPricesPaste}><label className="form-wide">Collage brut IG<textarea name="igPricesPaste" rows={8} placeholder="Collez ici les lignes copiées depuis IG (Entreprise, Titres, Prix actuel...)." required /></label><div className="inline-actions"><button className="button primary" type="submit">Importer les cours</button></div></form></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Sauvegarde</span><strong>Exporter ou restaurer les données</strong></div><span className="tag">JSON local</span></div><p className="page-intro">Conservez une copie JSON avant de vider les données du navigateur ou de changer d’appareil.</p><div className="inline-actions">{data && <button className="button secondary" onClick={() => downloadPortfolioBackup(data)}>Télécharger la sauvegarde</button>}<label className="button secondary" htmlFor="restore-backup">Restaurer une sauvegarde</label><input id="restore-backup" className="file-input" type="file" accept="application/json,.json" onChange={onRestore} /></div>{message && <p className="import-warning">{message}</p>}</article></section>
 }
 
-function PdfStatementsDataView({ data, importMessage, isImporting, onImportPdf, onReset }: { data: PortfolioData | null; importMessage: string | null; isImporting: boolean; onImportPdf: (event: FormEvent<HTMLFormElement>) => Promise<void>; onReset: () => void }) {
-  return <section className="page-stack"><article className="card import-hero"><div className="insight-icon purple"><Database size={21} /></div><div><span className="card-label">Portefeuille local</span><strong>Import unique depuis relevés PDF IG</strong><p>Le portefeuille est reconstruit à partir des relevés PDF téléchargés depuis l’historique IG.</p></div><span className="tag">Flux unique</span></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">État local</span><strong>{data ? 'Données présentes' : 'Aucune donnée locale'}</strong></div><button className="button secondary danger-button" type="button" onClick={onReset}>Vider l’application</button></div>{data ? <div className="import-summary"><span><b>{data.transactions.length}</b> opérations locales</span><span><b>{Object.keys(data.marketPrices ?? {}).length}</b> cours saisis</span><span><b>{data.auditLog?.length ?? 0}</b> événements audités</span></div> : <p className="page-intro">Importez vos relevés PDF pour reconstruire l’historique complet.</p>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import relevés IG</span><strong>Analyser des PDF de transactions</strong></div><span className="tag">Multi-fichiers</span></div><p className="page-intro">Sélectionnez les relevés PDF téléchargés dans IG. L’application extrait automatiquement les transactions détectées et évite les doublons.</p><form className="page-stack" onSubmit={onImportPdf}><label>Classe d’actif de secours<select name="fallbackAssetClass" defaultValue="Non classé"><option>Non classé</option><option>Actions individuelles</option><option>ETF Monde</option><option>ETF Small Caps</option><option>ETF Maison</option></select></label><p className="page-intro">Utilisée uniquement si l’instrument n’est pas reconnu automatiquement.</p><label className="form-wide">Relevés PDF<input name="statementPdfs" type="file" accept=".pdf,application/pdf" multiple required /></label><div className="inline-actions"><button className="button primary" type="submit" disabled={isImporting}>{isImporting ? 'Analyse en cours…' : 'Importer les relevés PDF'}</button></div></form>{importMessage && <p className="import-warning">{importMessage}</p>}</article></section>
+function PdfStatementsDataView({ data, importMessage, isImporting, storageDirectory, isDesktop, onImportPdf, onReset, onChooseStorageDirectory }: { data: PortfolioData | null; importMessage: string | null; isImporting: boolean; storageDirectory: string | null; isDesktop: boolean; onImportPdf: (event: FormEvent<HTMLFormElement>) => Promise<void>; onReset: () => void; onChooseStorageDirectory: () => Promise<void> }) {
+  return <section className="page-stack"><article className="card import-hero"><div className="insight-icon purple"><Database size={21} /></div><div><span className="card-label">Portefeuille local</span><strong>Import unique depuis relevés PDF IG</strong><p>Le portefeuille est reconstruit à partir des relevés PDF téléchargés depuis l’historique IG.</p></div><span className="tag">Flux unique</span></article><article className="card page-card"><div className="card-heading"><div><span className="card-label">État local</span><strong>{data ? 'Données présentes' : 'Aucune donnée locale'}</strong></div><button className="button secondary danger-button" type="button" onClick={onReset}>Vider l’application</button></div>{data ? <div className="import-summary"><span><b>{data.transactions.length}</b> opérations locales</span><span><b>{Object.keys(data.marketPrices ?? {}).length}</b> cours saisis</span><span><b>{data.auditLog?.length ?? 0}</b> événements audités</span></div> : <p className="page-intro">Importez vos relevés PDF pour reconstruire l’historique complet.</p>}{storageDirectory && <p className="page-intro">Dossier des données: <b>{storageDirectory}</b></p>}{isDesktop && <div className="inline-actions"><button className="button secondary" type="button" onClick={() => { void onChooseStorageDirectory() }}>Changer le dossier de données</button></div>}</article><article className="card page-card"><div className="card-heading"><div><span className="card-label">Import relevés IG</span><strong>Analyser des PDF de transactions</strong></div><span className="tag">Multi-fichiers</span></div><p className="page-intro">Sélectionnez les relevés PDF téléchargés dans IG. L’application extrait automatiquement les transactions détectées et évite les doublons.</p><form className="page-stack" onSubmit={onImportPdf}><label>Classe d’actif de secours<select name="fallbackAssetClass" defaultValue="Non classé"><option>Non classé</option><option>Actions individuelles</option><option>ETF Monde</option><option>ETF Small Caps</option><option>ETF Maison</option></select></label><p className="page-intro">Utilisée uniquement si l’instrument n’est pas reconnu automatiquement.</p><label className="form-wide">Relevés PDF<input name="statementPdfs" type="file" accept=".pdf,application/pdf" multiple required /></label><div className="inline-actions"><button className="button primary" type="submit" disabled={isImporting}>{isImporting ? 'Analyse en cours…' : 'Importer les relevés PDF'}</button></div></form>{importMessage && <p className="import-warning">{importMessage}</p>}</article></section>
 }
 
 /* Anciennes vues d’import Excel et de rapprochement, retirées du produit local.
@@ -786,9 +801,24 @@ function signedEuro(value: number): string {
   return `${value >= 0 ? '+' : '−'}${euro(Math.abs(value))}`
 }
 
+function isDesktopRuntime(): boolean {
+  return Boolean(window.desktopAPI?.isDesktop)
+}
+
+function getPortfolioStorageDirectory(): string | null {
+  if (!isDesktopRuntime()) return null
+  try {
+    return window.desktopAPI?.getDataDirectorySync() ?? null
+  } catch {
+    return null
+  }
+}
+
 function loadPortfolioData(): PortfolioData | null {
   try {
-    const rawData = window.localStorage.getItem('ig-portefeuille-data')
+    const rawData = isDesktopRuntime()
+      ? window.desktopAPI?.readPortfolioDataSync() ?? null
+      : window.localStorage.getItem('ig-portefeuille-data')
     if (!rawData) return null
     const parsed = JSON.parse(rawData) as PortfolioData & { importedAt?: string }
     return normalizePortfolioData({ ...parsed, createdAt: parsed.createdAt ?? parsed.importedAt ?? new Date().toISOString(), marketPrices: parsed.marketPrices ?? {} })
@@ -907,7 +937,12 @@ function createLocalPortfolio(): PortfolioData {
 }
 
 function savePortfolioData(data: PortfolioData): void {
-  window.localStorage.setItem('ig-portefeuille-data', JSON.stringify(data))
+  const serialized = JSON.stringify(data)
+  if (isDesktopRuntime()) {
+    window.desktopAPI?.writePortfolioDataSync(serialized)
+    return
+  }
+  window.localStorage.setItem('ig-portefeuille-data', serialized)
 }
 
 function downloadPortfolioBackup(data: PortfolioData): void {
