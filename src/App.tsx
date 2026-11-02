@@ -357,6 +357,7 @@ function App() {
       const parsedCashRows: Array<{ kind: 'Dépôt' | 'Retrait'; amount: number; occurredOn: string }> = []
       let unreadableFiles = 0
       let ignoredFiles = 0
+      let duplicateRows = 0
       const typeCounters: Record<'QUARTERLY' | 'ACCOUNT_OPENING' | 'ORDER_EX_ANTE_COST' | 'CANCELLED_ORDER' | 'BUY_ORDER' | 'SELL_ORDER' | 'UNKNOWN', number> = {
         QUARTERLY: 0,
         ACCOUNT_OPENING: 0,
@@ -371,13 +372,22 @@ function App() {
         const fileType = detectIgPdfType(file.name)
         typeCounters[fileType] += 1
 
-        if (fileType === 'ORDER_EX_ANTE_COST' || fileType === 'CANCELLED_ORDER') {
-          ignoredFiles += 1
-          continue
-        }
-
         try {
           const text = await extractTextFromPdfFile(file)
+
+          if (fileType === 'ORDER_EX_ANTE_COST' || fileType === 'CANCELLED_ORDER') {
+            const fromBuyStatement = parseIgOrderStatementPdfText(text, 'Achat')
+            const fromSellStatement = parseIgOrderStatementPdfText(text, 'Vente')
+            const fallbackOrders = [...fromBuyStatement, ...fromSellStatement]
+
+            if (fallbackOrders.length === 0) {
+              ignoredFiles += 1
+              continue
+            }
+
+            parsedOrders.push(...fallbackOrders)
+            continue
+          }
 
           if (fileType === 'BUY_ORDER' || fileType === 'SELL_ORDER') {
             const fromStatement = parseIgOrderStatementPdfText(text, fileType === 'SELL_ORDER' ? 'Vente' : 'Achat')
@@ -422,7 +432,10 @@ function App() {
         }
 
         const fingerprint = `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|${transaction.quantity ?? 0}|${transaction.grossAmount}`
-        if (existingFingerprints.has(fingerprint)) continue
+        if (existingFingerprints.has(fingerprint)) {
+          duplicateRows += 1
+          continue
+        }
         existingFingerprints.add(fingerprint)
         transactionsToAppend.push(transaction)
       }
@@ -443,13 +456,21 @@ function App() {
         }
 
         const fingerprint = `${transaction.occurredOn}|${transaction.kind}|${transaction.instrumentName}|0|${transaction.grossAmount}`
-        if (existingFingerprints.has(fingerprint)) continue
+        if (existingFingerprints.has(fingerprint)) {
+          duplicateRows += 1
+          continue
+        }
         existingFingerprints.add(fingerprint)
         transactionsToAppend.push(transaction)
       }
 
       if (transactionsToAppend.length === 0) {
-        setImportMessage(`Aucune nouvelle transaction détectée. PDF analysés: ${uniqueFiles.length}${ignoredFiles ? `, ${ignoredFiles} ignoré(s) (Ex Ante / Ordre annulé)` : ''}${unreadableFiles ? `, ${unreadableFiles} illisible(s)` : ''}.`)
+        const detectedRows = parsedOrders.length + parsedCashRows.length
+        if (detectedRows > 0 && duplicateRows > 0) {
+          setImportMessage(`Aucune nouvelle transaction: ${duplicateRows} ligne(s) détectée(s) sont déjà présentes. PDF analysés: ${uniqueFiles.length}${ignoredFiles ? `, ${ignoredFiles} ignoré(s) (Ex Ante / Ordre annulé)` : ''}${unreadableFiles ? `, ${unreadableFiles} illisible(s)` : ''}.`)
+        } else {
+          setImportMessage(`Aucune nouvelle transaction détectée. PDF analysés: ${uniqueFiles.length}${ignoredFiles ? `, ${ignoredFiles} ignoré(s) (Ex Ante / Ordre annulé)` : ''}${unreadableFiles ? `, ${unreadableFiles} illisible(s)` : ''}.`)
+        }
         return
       }
 

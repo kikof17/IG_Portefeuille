@@ -82,6 +82,21 @@ npm run dist:win:publish
 
 Cette commande utilise electron-builder et publie automatiquement la release.
 
+### Release automatique a chaque changement
+
+Le depot inclut un workflow GitHub Actions [auto-release.yml](.github/workflows/auto-release.yml).
+
+Sur chaque push vers `main`:
+
+1. bump automatique de version patch (`package.json` + `package-lock.json`)
+2. build Windows NSIS
+3. publication d'une release GitHub `vX.Y.Z` avec:
+	- setup `.exe`
+	- `.exe.blockmap`
+	- `latest.yml`
+
+Ce workflow rend le test/update in-app automatique sans refaire les commandes manuelles a chaque changement.
+
 ### Dossier des données
 
 En mode desktop, les données sont stockées dans un fichier JSON, dans un dossier
